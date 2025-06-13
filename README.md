@@ -3,11 +3,12 @@ This repository contains various configuration files used for personal developme
 
 It includes settings for editors, shells, and other tools to help streamline and standardize the development workflow.
 
+
+
+<br>
+
+
 <details>
-
-
-
-
 <summary>Competetive Programming</summary>
 <blockquote>
 
@@ -405,3 +406,81 @@ int main() {
 
 
 </details>
+
+
+
+
+
+
+<br>
+
+
+
+<details>
+<summary>Server</summary>
+<blockquote>
+
+
+<details>
+<summary>Update</summary>
+
+```bash
+sudo apt update -y && sudo apt upgrade -y
+sudo apt install -y zip apache2 screen mariadb-server mariadb-client curl software-properties-common lsb-release ca-certificates apt-transport-https
+```
+</details>
+
+
+<details>
+<summary>PHP</summary>
+
+```bash
+PHP_VER=8.2
+```
+```bash
+sudo add-apt-repository ppa:ondrej/php -y
+sudo apt update
+sudo apt install -y php$PHP_VER php$PHP_VER-cli php$PHP_VER-common php$PHP_VER-mbstring php$PHP_VER-xml php$PHP_VER-curl php$PHP_VER-mysql php$PHP_VER-zip
+sudo update-alternatives --install /usr/bin/php php /usr/bin/php$PHP_VER 100
+```
+```bash
+sudo update-alternatives --config php
+```
+</details>
+
+
+
+
+</blockquote>
+</details>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+.
