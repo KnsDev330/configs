@@ -8,6 +8,87 @@ It includes settings for editors, shells, and other tools to help streamline and
 <br>
 
 
+
+
+
+
+
+
+
+
+
+
+
+<details>
+<summary>New Linux Desktop Setup</summary>
+<blockquote>
+
+
+
+<details>
+<summary>Add User to Sudoers</summary>
+
+```bash
+nano /etc/sudoers
+```
+```bash
+USER_NAME  ALL=(ALL) NOPASSWD:ALL
+```
+</details>
+
+
+<details>
+<summary>Update</summary>
+
+```bash
+sudo apt update -y && sudo apt upgrade -y
+sudo apt install -y build-essential git-all curl wget vim tmux htop tree python3-pip python3-venv
+```
+</details>
+
+
+<details>
+<summary>Install Chrome</summary>
+
+```bash
+wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+sudo dpkg -i chrome-remote-desktop_current_amd64.deb
+sudo apt install -f
+sudo dpkg -i chrome-remote-desktop_current_amd64.deb
+sudo apt install -f
+sudo rm chrome-remote-desktop_current_amd64.deb
+```
+</details>
+
+
+
+
+
+</details>
+<br>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 <details>
 <summary>Competetive Programming</summary>
 <blockquote>
@@ -417,6 +498,148 @@ int main() {
 
 
 <details>
+<summary>Bash Configs</summary>
+<blockquote>
+
+
+<details>
+<summary>Shell</summary>
+
+```bash
+sudo apt-get install git-all -y
+sudo mkdir -p /usr/share/git-core/contrib/completion/
+sudo wget https://raw.githubusercontent.com/git/git/master/contrib/completion/git-prompt.sh -O /usr/share/git-core/contrib/completion/git-prompt.sh
+```
+```bash
+if [ -f /usr/share/bash-completion/bash_completion ]; then
+  . /usr/share/bash-completion/bash_completion
+fi
+
+if [ -f /usr/share/bash-completion/completions/git ]; then
+  . /usr/share/bash-completion/completions/git
+fi
+
+source /usr/share/git-core/contrib/completion/git-prompt.sh
+export PATH=$PATH:/usr/bin/git
+PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[01;31m\]$(__git_ps1 " (%s)")\[\033[00m\]\n\$ '
+```
+</details>
+
+
+<details>
+<summary>CustomBashRc</summary>
+
+```bash
+desktop-entry() {
+	while true; do
+		read -p "Enter the path to the desktop entry file (or 'exit' to quit): " entry_filename
+		if [ "$entry_filename" = "exit" ]; then
+			echo "Exiting..."
+			return 0
+		elif [ -f "/usr/share/applications/$entry_filename.desktop" ]; then
+			echo "Desktop entry already exists at $entry_filename"
+			return 0
+		elif [ -d "/usr/share/applications/$entry_filename.desktop" ]; then
+			echo "Path is a directory, please provide a file path."
+		elif [ -z "$entry_filename" ]; then
+			echo "Path cannot be empty, please provide a valid file path."
+		else
+			break
+		fi
+	done
+
+	while true; do
+	  	read -p "Enter the name of the application: " app_name
+		if [ -z "$app_name" ]; then
+			echo "Application name cannot be empty, please provide a valid name."
+		else
+			break
+		fi
+	done
+
+	while true; do
+		read -p "Enter the executable path: " exec_path
+		if [ -z "$exec_path" ]; then
+			echo "Executable path cannot be empty, please provide a valid path."
+		elif [ ! -f "$exec_path" ]; then
+			echo "Executable not found at $exec_path, please provide a valid path."
+		elif [ ! -x "$exec_path" ]; then
+			echo "File at $exec_path is not executable, please provide a valid executable path."
+		else
+			break
+		fi
+	done
+
+	while true; do
+		read -p "Enter the icon path (or leave empty for no icon): " icon_path
+		if [ -z "$icon_path" ]; then
+			icon_path=""
+			break
+		elif [ ! -f "$icon_path" ]; then
+			echo "Icon not found at $icon_path, please provide a valid path or leave empty."
+		else
+			break
+		fi
+	done
+
+	{
+		echo "[Desktop Entry]"
+		echo "Name=$app_name"
+		echo "Exec=$exec_path"
+		[ -n "$icon_path" ] && echo "Icon=$icon_path"
+		echo "Type=Application"
+		echo "Categories=Utility;"
+		echo "Comment=Custom application entry for $app_name"
+	} | sudo tee "/usr/share/applications/$entry_filename.desktop" > /dev/null
+
+	echo "Desktop entry created at /usr/share/applications/$entry_filename.desktop"
+	echo "You can now find $app_name in your application menu."
+}
+
+authbind-add() {
+	if [ -z "$1" ]; then
+		echo "Usage: authbind-add <port>"
+		return 1
+	fi
+	sudo touch /etc/authbind/byport/$1
+	sudo chown $USER /etc/authbind/byport/$1
+	sudo chmod 500 /etc/authbind/byport/$1
+
+	echo "Port $1 added to authbind"
+}
+
+authbind-remove() {
+	if [ -z "$1" ]; then
+	echo "Usage: authbind-remove <port>"
+	return 1
+	fi
+	sudo rm -f /etc/authbind/byport/$1
+
+	echo "Port $1 removed from authbind"
+}
+```
+</details>
+
+
+</blockquote>
+</details>
+
+
+
+
+
+
+
+<br>
+
+
+
+
+
+
+
+
+<details>
 <summary>Server</summary>
 <blockquote>
 
@@ -442,9 +665,136 @@ sudo add-apt-repository ppa:ondrej/php -y
 sudo apt update
 sudo apt install -y php$PHP_VER php$PHP_VER-cli php$PHP_VER-common php$PHP_VER-mbstring php$PHP_VER-xml php$PHP_VER-curl php$PHP_VER-mysql php$PHP_VER-zip
 sudo update-alternatives --install /usr/bin/php php /usr/bin/php$PHP_VER 100
+sudo service apache2 restart 2>/dev/null
 ```
 ```bash
 sudo update-alternatives --config php
+```
+</details>
+
+
+<details>
+<summary>Database (MariaDB)</summary>
+
+```bash
+sudo mysql_secure_installation
+```
+```bash
+DB_NEW_USER=
+```
+```bash
+DB_NEW_USER_PASS=
+```
+```bash
+mysql -u root -p
+```
+```bash
+CREATE USER '$DB_NEW_USER'@'localhost' IDENTIFIED BY '$DB_NEW_USER_PASS';
+GRANT ALL PRIVILEGES ON *.* TO '$DB_NEW_USER'@'localhost';
+FLUSH PRIVILEGES;
+```
+</details>
+
+
+<details>
+<summary>PHPMyAdmin</summary>
+
+```bash
+sudo apt-get install phpmyadmin -y
+sudo ln -s /usr/share/phpmyadmin /var/www/html/pma
+sudo service apache2 reload 2>/dev/null
+```
+</details>
+
+
+<details>
+<summary>Composer</summary>
+
+```bash
+EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+
+if [ "$EXPECTED_CHECKSUM" == "$ACTUAL_CHECKSUM" ]
+then
+	php composer-setup.php
+	sudo mv composer.phar /usr/local/bin/composer
+else
+	echo 'ERROR: Invalid installer checksum'
+fi
+rm composer-setup.php
+```
+</details>
+
+
+<details>
+<summary>Node.js</summary>
+
+```bash
+NODEJS_VERSION_TO_INSTALL=
+```
+```bash
+curl -fsSL https://deb.nodesource.com/setup_$NODEJS_VERSION_TO_INSTALL.x -o nodesource_setup.sh;
+sudo -E bash nodesource_setup.sh
+sudo apt-get install -y nodejs
+node -v
+```
+</details>
+
+
+<details>
+<summary>Reverse Proxy</summary>
+
+```bash
+sudo a2enmod proxy
+sudo a2enmod proxy_http
+sudo a2enmod proxy_balancer
+sudo a2enmod lbmethod_byrequests
+```
+```bash
+sudo systemctl restart apache2
+```
+```bash
+sudo nano /etc/apache2/sites-available/000-default.conf
+```
+```bash
+<VirtualHost *:80>
+	ServerName DOMAIN_NAME
+	ProxyPreserveHost On
+	ProxyPass / http://127.0.0.1:PORT/
+	ProxyPassReverse / http://127.0.0.1:PORT/
+</VirtualHost>
+```
+```bash
+sudo systemctl restart apache2
+```
+</details>
+
+
+<details>
+<summary>Authbind</summary>
+
+```bash
+sudo apt install authbind -y
+sudo chmod +x /usr/bin/authbind
+sudo chown $USER /usr/bin/authbind
+```
+```bash
+sudo systemctl restart apache2
+```
+```bash
+sudo nano /etc/apache2/sites-available/000-default.conf
+```
+```bash
+<VirtualHost *:80>
+	ServerName DOMAIN_NAME
+	ProxyPreserveHost On
+	ProxyPass / http://127.0.0.1:PORT/
+	ProxyPassReverse / http://127.0.0.1:PORT/
+</VirtualHost>
+```
+```bash
+sudo systemctl restart apache2
 ```
 </details>
 
