@@ -480,12 +480,119 @@ int main() {
 </details>
 
 
-</blockquote>
+
+<details>
+<summary>Validator sample</summary>
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+#include "testlib.h"
+
+int main(int argc, char* argv[]) {
+	registerValidation(argc, argv);
+
+	int tolTC = 1;
+	// tolTC = inf.readInt(1, 1000, "~tolTC~");
+	// inf.readEoln();
+
+	for(int i = 1; i <= tolTC; i++) {
+		setTestCase(i);
+		int y = inf.readInt(1, 3000, "y");
+		inf.readEoln();
+	}
+
+	inf.readEof();
 
 
+	// vector<int> ints = inf.readInts(sz);
+	// vector<int> ints = inf.readInts(sz, mn, mx, "name");
+	// inf.readEof();
+	// inf.readEoln();
+	// inf.readSpace();
+}
+
+```
+</details>
+
+<details>
+<summary>Checker sample</summary>
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+#include "testlib.h"
 
 
+int main(int argc, char *argv[]) {
+	registerTestlibCmd(argc, argv);
 
+	int tolTC = 1;
+	// tolTC = inf.readInt(1, 1000);
+
+	int curTC = 0;
+	while(++curTC <= tolTC) {
+		setTestCase(curTC);
+
+		pattern ptn("[Yy][Es][Ss]|[Nn][Oo]");
+
+		string j = ans.readLine(ptn, "j");
+		string p = ouf.readLine(ptn, "p");
+
+		transform(j.begin(), j.end(), j.begin(), ::tolower);
+		transform(p.begin(), p.end(), p.begin(), ::tolower);
+
+		if(j != p) {
+			ouf.quitf(_wa, "expected: %s, found: %s", j.c_str(), p.c_str());
+		}
+	}
+
+	quitf(_ok, "");
+}
+
+```
+</details>
+
+<details>
+<summary>Generator sample</summary>
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+#include "testlib.h"
+
+int main(int argc, char* argv[]) {
+	registerGen(argc, argv, 1);
+
+	vector<string> manual = {};
+
+	int tci = stoi(string(argv[1]));
+	int mtc = int(manual.size());
+
+	if(tci <= mtc) {
+		println(manual[tci - 1]);
+		return 0;
+	}
+
+
+	int n = rnd.next(1, 1000);
+	println(n);
+
+	while(n--) {
+		println(rnd.next(1, 3000));
+	}
+
+
+	// rnd.next(100)    .................random number in range [0, 99]
+	// rnd.next(10, 20)    ..............random number in range [10, 20]
+	// rnd.next("[A-Za-z0-9]{5,10}")  ...random string of length 5 to 10 with alphanumeric characters
+	// rnd.next("A{3,5}B{2,4}")    ......random string with 3 to 5 'A's followed by 2 to 4 'B's
+	// rnd.next("one|two|three")    .....random word out of 'one', 'two' and 'three'
+	// rnd.next("[1-9][0-9]{99}")    ....random 100-digit number as a string
+}
+
+```
 </details>
 
 
@@ -493,6 +600,9 @@ int main() {
 
 
 
+
+</blockquote>
+</details>
 <br>
 
 
