@@ -486,7 +486,7 @@ int main() {
 
 ```cpp
 #include <bits/stdc++.h>
-using namespace std;
+
 #include "testlib.h"
 
 int main(int argc, char* argv[]) {
@@ -505,7 +505,6 @@ int main(int argc, char* argv[]) {
 	inf.readEof();
 
 
-	// vector<int> ints = inf.readInts(sz);
 	// vector<int> ints = inf.readInts(sz, mn, mx, "name");
 	// inf.readEof();
 	// inf.readEoln();
@@ -520,7 +519,7 @@ int main(int argc, char* argv[]) {
 
 ```cpp
 #include <bits/stdc++.h>
-using namespace std;
+
 #include "testlib.h"
 
 
@@ -536,8 +535,8 @@ int main(int argc, char *argv[]) {
 
 		pattern ptn("[Yy][Es][Ss]|[Nn][Oo]");
 
-		string j = ans.readLine(ptn, "j");
-		string p = ouf.readLine(ptn, "p");
+		std::string j = ans.readLine(ptn, "j");
+		std::string p = ouf.readLine(ptn, "p");
 
 		transform(j.begin(), j.end(), j.begin(), ::tolower);
 		transform(p.begin(), p.end(), p.begin(), ::tolower);
@@ -558,16 +557,15 @@ int main(int argc, char *argv[]) {
 
 ```cpp
 #include <bits/stdc++.h>
-using namespace std;
 
 #include "testlib.h"
 
 int main(int argc, char* argv[]) {
 	registerGen(argc, argv, 1);
 
-	vector<string> manual = {};
+	std::vector<std::string> manual = {};
 
-	int tci = stoi(string(argv[1]));
+	int tci = std::stoi(std::string(argv[1]));
 	int mtc = int(manual.size());
 
 	if(tci <= mtc) {
