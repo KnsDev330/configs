@@ -593,6 +593,30 @@ int main(int argc, char* argv[]) {
 ```
 </details>
 
+<details>
+<summary>Add problem bashrc</summary>
+
+```bash
+add-q() {
+   if [ -z "$1" ]; then
+      echo "Usage: add-q name_of_question"
+      return 1
+   fi
+
+   local question_name="$1"
+   mkdir -p ~/supc/basic/"$question_name"
+
+   echo -e "#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n\n\tint tt;\n\tcin >> tt;\n\n\twhile(tt--) {\n\t\t\n\t}\n\n\treturn 0;\n}" | tee ~/supc/basic/$question_name/$question_name.cpp
+   echo -e "#include <bits/stdc++.h>\n\n#include \"testlib.h\"\n\nint main(int argc, char* argv[]) {\n\tregisterValidation(argc, argv);\n\n\tint tolTC = 1;\n\t// tolTC = inf.readInt(1, 1000, \"~tolTC~\");\n\t// inf.readEoln();\n\n\tfor(int i = 1; i <= tolTC; i++) {\n\t\tsetTestCase(i);\n\t\tint y = inf.readInt(1, 3000, \"y\");\n\t\tinf.readEoln();\n\t}\n\n\tinf.readEof();\n\n\n\t// vector<int> ints = inf.readInts(sz, mn, mx, \"name\");\n\t// inf.readEof();\n\t// inf.readEoln();\n\t// inf.readSpace();\n}\n" | tee ~/supc/basic/$question_name/validator.cpp
+   touch ~/supc/basic/"$question_name"/{gen,checker}.cpp
+   echo -e "#include <bits/stdc++.h>\n\n#include \"testlib.h\"\n\n\nint main(int argc, char *argv[]) {\n\tregisterTestlibCmd(argc, argv);\n\n\tint tolTC = 1;\n\t// tolTC = inf.readInt(1, 1000);\n\n\tint curTC = 0;\n\twhile(++curTC <= tolTC) {\n\t\tsetTestCase(curTC);\n\n\t\tpattern ptn(\"[YESyesNOno]+\");\n\n\t\tstd::string j = ans.readLine(ptn, \"j\");\n\t\tstd::string p = ouf.readLine(ptn, \"p\");\n\n\t\ttransform(j.begin(), j.end(), j.begin(), ::tolower);\n\t\ttransform(p.begin(), p.end(), p.begin(), ::tolower);\n\n\t\tif(j != p) {\n\t\t\touf.quitf(_wa, \"expected: %s, found: %s\", j.c_str(), p.c_str());\n\t\t}\n\t}\n\n\tquitf(_ok, \"\");\n}\n" | tee ~/supc/basic/"$question_name"/checker.cpp
+   echo -e "#include <bits/stdc++.h>\n\n#include \"testlib.h\"\n\n\nint main(int argc, char* argv[]) {\n\tregisterGen(argc, argv, 1);\n\n\tstd::vector<std::string> manual = {};\n\n\tint tci = std::stoi(std::string(argv[1]));\n\tint mtc = int(manual.size());\n\n\tif(tci <= mtc) {\n\t\tprintln(manual[tci - 1]);\n\t\treturn 0;\n\t}\n\n\n\tint n = rnd.next(1, 1000);\n\tprintln(n);\n\n\twhile(n--) {\n\t\tprintln(rnd.next(1, 3000));\n\t}\n\n\n\t// rnd.next(100)    .................random number in range [0, 99]\n\t// rnd.next(10, 20)    ..............random number in range [10, 20]\n\t// rnd.next(\"[A-Za-z0-9]{5,10}\")  ...random string of length 5 to 10 with alphanumeric characters\n\t// rnd.next(\"A{3,5}B{2,4}\")    ......random string with 3 to 5 'A's followed by 2 to 4 'B's\n\t// rnd.next(\"one|two|three\")    .....random word out of 'one', 'two' and 'three'\n\t// rnd.next(\"[1-9][0-9]{99}\")    ....random 100-digit number as a string\n}\n" | tee ~/supc/basic/"$question_name"/gen.cpp
+   touch ~/supc/basic/"$question_name"/"$question_name".cpp
+   echo "Files created for question: $question_name"
+}
+```
+</details>
+
 
 
 
