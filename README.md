@@ -62,6 +62,584 @@ sudo rm chrome-remote-desktop_current_amd64.deb
 
 
 
+<details>
+<summary>Install Chrome</summary>
+
+```bash
+# Dash to Panel
+
+sudo apt update -y
+sudo apt upgrade -y
+
+sudo apt install -y build-essential \
+   wget \
+   git \
+   zip \
+   curl \
+   apache2 \
+   screen \
+   mariadb-server \
+   mariadb-client \
+   ca-certificates \
+   gnupg \
+   gpg \
+   apt-transport-https \
+   lsb-release \
+   gnupg2 \
+   software-properties-common \
+   micro \
+   net-tools \
+   gromit-mpx \
+   mesa-utils \
+   htop \
+   vlc \
+   v4l2loopback-dkms \
+   gnome-tweaks \
+   gnome-shell-extensions \
+   gnome-shell-extension-manager \
+   ibus-avro \
+   preload \
+   flatpak
+
+
+if grep -qi "ubuntu" /etc/os-release; then
+   OS="ubuntu"
+elif grep -qi "debian" /etc/os-release; then
+   OS="debian"
+else
+   OS="unsupported"
+fi
+
+if [[ "$OS" == "ubuntu" ]]; then
+   sudo apt install -y ubuntu-restricted-extras
+fi
+
+KEYRING_DIR="/etc/apt/keyrings"
+
+is_installed() {
+  local pkg="${1:-}"
+  [[ -n "$pkg" ]] || return 2
+
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'
+}
+
+i_xournal() {
+   if is_installed "xournalpp"; then
+      echo "Xournal++ is already installed."
+      return 0
+   fi
+
+   sudo add-apt-repository ppa:apandada1/xournalpp-stable -y
+   sudo apt update -y
+   sudo apt install xournalpp -y
+
+   echo "Xournal++ installed successfully."
+}
+
+i_cloudflare_warp() {
+   if is_installed "cloudflare-warp"; then
+      echo "Cloudflare WARP is already installed."
+      return 0
+   fi
+
+   WARP_KEYRING_PATH="${KEYRING_DIR}/cloudflare-warp-archive-keyring.gpg"
+   WARP_LIST_PATH="/etc/apt/sources.list.d/cloudflare-client.list"
+   WARP_REPO_BASE="https://pkg.cloudflareclient.com/"
+   WARP_KEY_URL="https://pkg.cloudflareclient.com/pubkey.gpg"
+
+   # distro codename (jammy, noble, bookworm, etc.)
+   codename="$(lsb_release -cs)"
+
+   sudo apt update -y
+   sudo install -d -m 0755 "$KEYRING_DIR"
+
+   tmp="$(mktemp)"
+   trap 'rm -f "$tmp"' EXIT
+
+   wget -qO "$tmp" "$WARP_KEY_URL"
+   sudo gpg --dearmor < "$tmp" | sudo tee "$WARP_KEYRING_PATH" >/dev/null
+   sudo chmod 0644 "$WARP_KEYRING_PATH"
+
+   echo "deb [arch=amd64 signed-by=${WARP_KEYRING_PATH}] ${WARP_REPO_BASE} ${codename} main" \
+      | sudo tee "$WARP_LIST_PATH" >/dev/null
+
+   sudo apt update -y
+   sudo apt install -y cloudflare-warp
+
+   # Optional: show version / sanity check
+   command -v warp-cli >/dev/null && warp-cli --version || true
+}
+
+
+i_chrome() {
+   if is_installed "google-chrome-stable"; then
+      echo "Google Chrome is already installed."
+      return 0
+   fi
+
+   local chrome_deb_file="google-chrome-stable_current_amd64.deb"
+
+   if [[ -f "$chrome_deb_file" ]]; then rm -f "$chrome_deb_file"; fi
+
+   # chrome
+   wget "https://dl.google.com/linux/direct/$chrome_deb_file"
+
+   if [[ ! -f "$chrome_deb_file" ]]; then
+      echo "Failed to download Google Chrome .deb file."
+      return 1
+   fi
+   
+   if sudo apt-get install -y "$chrome_deb_file"; then
+      :
+   else
+      # Fallback for older setups: dpkg then fix deps
+      sudo dpkg -i "$chrome_deb_file" || true
+      sudo apt-get -f install -y
+   fi
+
+   if [[ -f "$chrome_deb_file" ]]; then rm -f "$chrome_deb_file"; fi
+   echo "Google Chrome installed successfully."
+}
+
+
+i_git() {
+   if is_installed "git-all"; then
+      echo "Git is already installed."
+      return 0
+   fi
+
+   # git
+   sudo apt install git-all -y
+   sudo mkdir /usr/share/git-core/contrib/completion/
+   sudo wget https://raw.githubusercontent.com/git/git/master/contrib/completion/git-prompt.sh -O /usr/share/git-core/contrib/completion/git-prompt.sh
+
+   echo "Git installed successfully."
+}
+
+i_vsCode() {
+   if is_installed "code"; then
+      echo "VSCode is already installed."
+      return 0
+   fi
+
+   # vscode
+   VSCODE_KEYRING_PATH="${KEYRING_DIR}/packages.microsoft.gpg"
+   VSCODE_LIST_PATH="/etc/apt/sources.list.d/vscode.list"
+   VSCODE_REPO_LINE='deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main'
+   VSCODE_KEY_URL="https://packages.microsoft.com/keys/microsoft.asc"
+
+   sudo apt update -y
+
+   sudo install -d -m 0755 "$KEYRING_DIR"
+
+   tmp="$(mktemp)"
+   trap 'rm -f "$tmp"' EXIT
+
+   wget -qO "$tmp" "$VSCODE_KEY_URL"
+   sudo gpg --dearmor < "$tmp" | sudo tee "$VSCODE_KEYRING_PATH" >/dev/null
+   sudo chmod 0644 "$VSCODE_KEYRING_PATH"
+
+   echo "$VSCODE_REPO_LINE" | sudo tee "$VSCODE_LIST_PATH" >/dev/null
+
+   sudo apt update -y
+   sudo apt install -y code
+}
+
+
+
+i_cloudflareTunnel() {
+   if is_installed "cloudflared"; then
+      echo "Cloudflare Tunnel is already installed."
+      return 0
+   fi
+
+   local cloudflare_tunnel_deb_file="cloudflared-linux-amd64.deb"
+
+   if [[ -f "$cloudflare_tunnel_deb_file" ]]; then rm -f "$cloudflare_tunnel_deb_file"; fi
+
+   # cloudflare_tunnel
+   wget "https://github.com/cloudflare/cloudflared/releases/latest/download/$cloudflare_tunnel_deb_file"
+
+   if [[ ! -f "$cloudflare_tunnel_deb_file" ]]; then
+      echo "Failed to download Cloudflare Tunnel .deb file."
+      return 1
+   fi
+   
+   if sudo apt-get install -y "$cloudflare_tunnel_deb_file"; then
+      :
+   else
+      # Fallback for older setups: dpkg then fix deps
+      sudo dpkg -i "$cloudflare_tunnel_deb_file" || true
+      sudo apt-get -f install -y
+   fi
+
+   if [[ -f "$cloudflare_tunnel_deb_file" ]]; then rm -f "$cloudflare_tunnel_deb_file"; fi
+   echo "Cloudflare Tunnel installed successfully."
+}
+
+
+
+i_php() {
+   local ver="${1:-8.5}"
+
+   # check by package (more reliable than checking 'php' binary)
+   if dpkg -s "php${ver}-cli" >/dev/null 2>&1; then
+      echo "PHP ${ver} is already installed."
+      return 0
+   fi
+
+   # Ubuntu: add Ondrej Surý PPA (contains PHP 8.5 packages)
+   sudo LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+   sudo apt update -y
+
+   # sanity: ensure that version exists in apt metadata before installing
+   if ! apt-cache show "php${ver}-cli" >/dev/null 2>&1; then
+      echo "ERROR: php${ver}-cli not found in APT sources."
+      echo "You're likely on a distro/codename not supported by the repo, or repo add failed."
+      return 1
+   fi
+
+   # install common runtime + FPM + popular extensions
+   sudo apt install -y \
+      "php${ver}-fpm" \
+      "php${ver}-common" \
+      "php${ver}-xml" \
+      "php${ver}-mysqli" \
+      "php${ver}-bcmath" \
+      "php${ver}-zip" \
+      "php${ver}-intl" \
+      "php${ver}-ldap" \
+      "php${ver}-gd" \
+      "php${ver}-cli" \
+      "php${ver}-bz2" \
+      "php${ver}-curl" \
+      "php${ver}-mbstring" \
+      "php${ver}-pgsql" \
+      "php${ver}-soap" \
+      "php${ver}-cgi" \
+      "php${ver}-opcache"
+
+   # make this version the default `php` (safe: only if update-alternatives entries exist)
+   if update-alternatives --list php >/dev/null 2>&1; then
+      sudo update-alternatives --set php "/usr/bin/php${ver}" || true
+      sudo update-alternatives --set phar "/usr/bin/phar${ver}" 2>/dev/null || true
+      sudo update-alternatives --set phar.phar "/usr/bin/phar.phar${ver}" 2>/dev/null || true
+      sudo update-alternatives --set phpize "/usr/bin/phpize${ver}" 2>/dev/null || true
+      sudo update-alternatives --set php-config "/usr/bin/php-config${ver}" 2>/dev/null || true
+   fi
+
+   php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+   php composer-setup.php
+   php -r "unlink('composer-setup.php');"
+   sudo mv composer.phar /usr/local/bin/composer
+
+   php -v
+}
+
+
+i_apacheMods() {
+   # apache mods
+   sudo a2enmod proxy \
+      proxy_http \
+      proxy_ajp \
+      rewrite \
+      deflate \
+      headers \
+      proxy_balancer \
+      proxy_connect \
+      proxy_html \
+      ssl \
+      lbmethod_byrequests
+
+      echo "
+#<VirtualHost *:80>
+#   ServerName 
+#   ProxyPreserveHost On
+#   ProxyPass / http://127.0.0.1:/
+#   ProxyPassReverse / http://127.0.0.1:/
+#</VirtualHost>\n" | sudo tee -a /etc/apache2/sites-available/000-default.conf
+
+   sudo systemctl restart apache2
+}
+
+
+i_slack() {
+   if is_installed "slack"; then
+      echo "Slack is already installed."
+      return 0
+   fi
+
+   local slack_deb_file="slack-desktop-4.47.69-amd64.deb"
+   if [[ -f "$slack_deb_file" ]]; then rm -f "$slack_deb_file"; fi
+
+   # slack
+   wget "https://downloads.slack-edge.com/desktop-releases/linux/x64/4.47.69/$slack_deb_file" -O "$slack_deb_file"
+
+   if [[ ! -f "$slack_deb_file" ]]; then
+      echo "Failed to download Slack .deb file."
+      return 1
+   fi
+
+   if sudo apt-get install -y "$slack_deb_file"; then
+      :
+   else
+      # Fallback for older setups: dpkg then fix deps
+      sudo dpkg -i "$slack_deb_file" || true
+      sudo apt-get -f install -y
+   fi
+
+   if [[ -f "$slack_deb_file" ]]; then rm -f "$slack_deb_file"; fi
+   sudo apt update
+   sudo apt install -y pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome
+   echo "Slack installed successfully."
+}
+
+
+
+i_authBind() {
+   if is_installed "authbind"; then
+      echo "authbind is already installed."
+      return 0
+   fi
+
+   # authbind
+   sudo apt install authbind -y
+   sudo chmod +x /usr/bin/authbind
+   sudo chown $USER /usr/bin/authbind
+}
+
+i_nodeJs() {
+   if is_installed "node"; then
+      echo "Node.js is already installed."
+      return 0
+   fi
+
+   # nodejs
+   sudo curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+   sudo apt install -y nodejs
+   sudo npm i -g pnpm yarn tsc-watch typescript @types/node express @types/express
+
+   echo "Node.js installed successfully."
+}
+
+
+i_docker() {
+   if is_installed "docker-ce"; then
+      echo "Docker is already installed (docker-ce)."
+      return 0
+   fi
+
+   # remove conflicting/old packages (ignore failures)
+   for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+      sudo apt remove -y "$pkg" >/dev/null 2>&1 || true
+   done
+
+   sudo apt update -y
+   sudo apt install -y ca-certificates curl gnupg
+
+   sudo install -m 0755 -d /etc/apt/keyrings
+
+   # derive OS + codename from /etc/os-release
+   . /etc/os-release
+   local os_id="$ID"                 # ubuntu / debian
+   local codename="${VERSION_CODENAME:-}"
+   if [ -z "$codename" ]; then
+      echo "ERROR: VERSION_CODENAME is empty. Your distro may be too old/odd."
+      return 1
+   fi
+   DOCKER_REPO_URL="https://download.docker.com/linux/${os_id}"
+   DOCKER_ASC_PATH="${KEYRING_DIR}/docker.asc"
+   DOCKER_LIST_PATH="/etc/apt/sources.list.d/docker.list"
+
+   # key
+   sudo curl -fsSL "${DOCKER_REPO_URL}/gpg" -o $DOCKER_ASC_PATH
+   sudo chmod a+r $DOCKER_ASC_PATH
+
+   # repo
+   echo "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_ASC_PATH}] ${DOCKER_REPO_URL} ${codename} stable" \
+      | sudo tee $DOCKER_LIST_PATH >/dev/null
+
+   sudo apt update -y
+   sudo apt install -y \
+      docker-ce docker-ce-cli containerd.io \
+      docker-buildx-plugin docker-compose-plugin
+
+   # enable/start
+   sudo systemctl enable --now docker
+
+   # docker group (needs re-login to fully apply)
+   sudo usermod -aG docker "$USER"
+
+   # quick sanity
+   docker --version
+   docker compose version
+
+   echo "NOTE: run 'newgrp docker' or log out/in so you can run docker without sudo."
+}
+
+
+i_mysql() {
+   # mysql
+   while true; do
+      read -p "Run mysql_secure_installation? [y/n]: " yn
+      case $yn in
+      [Yy]*)
+         sudo mysql_secure_installation
+         break
+         ;;
+      [Nn]*) break ;;
+      *) echo "Please answer yes or no." ;;
+      esac
+   done
+
+   MYSQL_ROOT_USER="root"
+
+   stty -echo
+   read -p "Enter your MySQL root password: " MYSQL_ROOT_PASSWORD
+   stty echo
+   echo
+
+   read -p "Enter your new MySQL user: " NEW_USER
+
+   while true; do
+      stty -echo
+      read -p "Enter new password for $NEW_USER: " NEW_USER_PASSWORD
+      stty echo
+      echo
+      stty -echo
+      read -p "Confirm password for $NEW_USER  : " CONFIRM_PASSWORD
+      stty echo
+      echo
+
+      if [ "$NEW_USER_PASSWORD" != "$CONFIRM_PASSWORD" ]; then
+         echo "Passwords do not match. Try again."
+      else
+         break
+      fi
+   done
+
+   sudo mysql -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" <<EOF
+CREATE USER '$NEW_USER'@'localhost' IDENTIFIED BY '$NEW_USER_PASSWORD';
+GRANT ALL PRIVILEGES ON *.* TO '$NEW_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+   # mysql
+
+   sudo apt install phpmyadmin -y
+   sudo ln -s /usr/share/phpmyadmin /var/www/html/pma
+   sudo systemctl restart apache2
+}
+
+i_postman() {
+   if is_installed "postman"; then
+      echo "Postman is already installed."
+      return 0
+   fi
+
+   local postman_deb_file="postman-linux-x64.deb"
+   if [[ -f "$postman_deb_file" ]]; then rm -f "$postman_deb_file"; fi
+
+   # postman
+   wget "https://dl.pstmn.io/download/latest/linux_64" -O "$postman_deb_file"
+
+   if [[ ! -f "$postman_deb_file" ]]; then
+      echo "Failed to download Postman .deb file."
+      return 1
+   fi
+
+   if sudo apt-get install -y "$postman_deb_file"; then
+      :
+   else
+      # Fallback for older setups: dpkg then fix deps
+      sudo dpkg -i "$postman_deb_file" || true
+      sudo apt-get -f install -y
+   fi
+
+   if [[ -f "$postman_deb_file" ]]; then rm -f "$postman_deb_file"; fi
+   echo "Postman installed successfully."
+}
+
+i_telegram() {
+   if is_installed "telegram-desktop"; then
+      echo "Telegram is already installed."
+      return 0
+   fi
+
+   sudo add-apt-repository ppa:atareao/telegram -y
+   sudo apt-get update -y
+   sudo apt-get install telegram -y
+   echo "Telegram installed successfully."
+}
+
+i_pgadmin4() {
+   if is_installed "pgadmin4-desktop"; then
+      echo "pgAdmin4 Desktop is already installed."
+      return 0
+   fi
+
+   local KEYRING_DIR="/etc/apt/keyrings"
+   local PGADMIN_KEYRING_PATH="${KEYRING_DIR}/packages-pgadmin-org.gpg"
+   local PGADMIN_LIST_PATH="/etc/apt/sources.list.d/pgadmin4.list"
+   local PGADMIN_KEY_URL="https://www.pgadmin.org/static/packages_pgadmin_org.pub"
+
+   local codename
+   codename="$(lsb_release -cs)"
+
+   sudo apt update -y
+   sudo apt install -y ca-certificates curl gnupg lsb-release
+   sudo install -d -m 0755 "$KEYRING_DIR"
+
+   tmp="$(mktemp)"
+   trap 'rm -f "$tmp"' EXIT
+
+   curl -fsS "$PGADMIN_KEY_URL" -o "$tmp"
+   sudo gpg --dearmor < "$tmp" | sudo tee "$PGADMIN_KEYRING_PATH" >/dev/null
+   sudo chmod 0644 "$PGADMIN_KEYRING_PATH"
+
+   echo "deb [signed-by=${PGADMIN_KEYRING_PATH}] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/${codename} pgadmin4 main" \
+      | sudo tee "$PGADMIN_LIST_PATH" >/dev/null
+
+   sudo apt update -y
+   sudo apt install -y pgadmin4-desktop
+}
+
+
+
+# Run installations\
+i_telegram
+i_cloudflare_warp
+i_chrome
+i_git
+i_vsCode
+i_cloudflareTunnel
+i_php "8.5"
+i_apacheMods
+i_xournal
+i_slack
+i_authBind
+i_nodeJs
+i_docker
+i_postman
+i_pgadmin4
+
+cmdArgs=("$@")
+isMysqlArg=0
+
+for arg in "${cmdArgs[@]}"; do
+   if [[ "$arg" == "--mysql" ]]; then
+      isMysqlArg=1
+      break
+   fi
+done
+
+
+if [[ $isMysqlArg -eq 1 ]]; then
+   i_mysql
+fi
+
+```
+</details>
+
 
 
 </details>
