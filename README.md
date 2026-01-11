@@ -65,42 +65,55 @@ sudo rm chrome-remote-desktop_current_amd64.deb
 <details>
 <summary>Install Chrome</summary>
 
-```bash
-# Dash to Panel
+```bash# Dash to Panel
 
-sudo apt update -y
-sudo apt upgrade -y
+cmdArgs=("$@")
+isMysqlArg=0
+isNewArg=0
 
-sudo apt install -y build-essential \
-   wget \
-   git \
-   zip \
-   curl \
-   apache2 \
-   screen \
-   mariadb-server \
-   mariadb-client \
-   ca-certificates \
-   gnupg \
-   gpg \
-   apt-transport-https \
-   lsb-release \
-   gnupg2 \
-   software-properties-common \
-   micro \
-   net-tools \
-   gromit-mpx \
-   mesa-utils \
-   htop \
-   vlc \
-   v4l2loopback-dkms \
-   gnome-tweaks \
-   gnome-shell-extensions \
-   gnome-shell-extension-manager \
-   ibus-avro \
-   preload \
-   flatpak
+for arg in "${cmdArgs[@]}"; do
+   if [[ "$arg" == "--mysql" ]]; then isMysqlArg=1; fi
+   if [[ "$arg" == "-n" ]]; then isNewArg=1; fi
+done
 
+if [[ $isNewArg -eq 1 ]]; then
+   echo "Running new installation setup..."
+
+   sudo apt update -y
+   sudo apt upgrade -y
+
+   sudo apt install -y build-essential \
+      wget \
+      linux-headers-amd64 \
+      git \
+      zip \
+      curl \
+      apache2 \
+      screen \
+      mariadb-server \
+      mariadb-client \
+      ca-certificates \
+      gnupg \
+      gpg \
+      apt-transport-https \
+      lsb-release \
+      gnupg2 \
+      micro \
+      net-tools \
+      gromit-mpx \
+      mesa-utils \
+      htop \
+      vlc \
+      v4l2loopback-dkms \
+      gnome-tweaks \
+      gnome-shell-extensions \
+      gnome-shell-extension-manager \
+      ibus-avro \
+      preload \
+      flatpak
+else
+   echo "Running standard installation setup..."
+fi
 
 if grep -qi "ubuntu" /etc/os-release; then
    OS="ubuntu"
@@ -111,7 +124,7 @@ else
 fi
 
 if [[ "$OS" == "ubuntu" ]]; then
-   sudo apt install -y ubuntu-restricted-extras
+   sudo apt install -y ubuntu-restricted-extras software-properties-common
 fi
 
 KEYRING_DIR="/etc/apt/keyrings"
@@ -120,7 +133,11 @@ is_installed() {
   local pkg="${1:-}"
   [[ -n "$pkg" ]] || return 2
 
-  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'
+  if [[ $(which "$pkg") == "" ]]; then
+   return 1
+   else
+   return 0
+   fi
 }
 
 i_xournal() {
@@ -129,8 +146,8 @@ i_xournal() {
       return 0
    fi
 
-   sudo add-apt-repository ppa:apandada1/xournalpp-stable -y
-   sudo apt update -y
+   sudo add-apt-repository ppa:apandada1/xournalpp-stable -y >/dev/null
+   sudo apt update -y >/dev/null
    sudo apt install xournalpp -y
 
    echo "Xournal++ installed successfully."
@@ -150,7 +167,7 @@ i_cloudflare_warp() {
    # distro codename (jammy, noble, bookworm, etc.)
    codename="$(lsb_release -cs)"
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo install -d -m 0755 "$KEYRING_DIR"
 
    tmp="$(mktemp)"
@@ -163,7 +180,7 @@ i_cloudflare_warp() {
    echo "deb [arch=amd64 signed-by=${WARP_KEYRING_PATH}] ${WARP_REPO_BASE} ${codename} main" \
       | sudo tee "$WARP_LIST_PATH" >/dev/null
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y cloudflare-warp
 
    # Optional: show version / sanity check
@@ -228,7 +245,7 @@ i_vsCode() {
    VSCODE_REPO_LINE='deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main'
    VSCODE_KEY_URL="https://packages.microsoft.com/keys/microsoft.asc"
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
 
    sudo install -d -m 0755 "$KEYRING_DIR"
 
@@ -241,7 +258,7 @@ i_vsCode() {
 
    echo "$VSCODE_REPO_LINE" | sudo tee "$VSCODE_LIST_PATH" >/dev/null
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y code
 }
 
@@ -290,7 +307,7 @@ i_php() {
 
    # Ubuntu: add Ondrej Surý PPA (contains PHP 8.5 packages)
    sudo LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
-   sudo apt update -y
+   sudo apt update -y >/dev/null
 
    # sanity: ensure that version exists in apt metadata before installing
    if ! apt-cache show "php${ver}-cli" >/dev/null 2>&1; then
@@ -389,7 +406,7 @@ i_slack() {
    fi
 
    if [[ -f "$slack_deb_file" ]]; then rm -f "$slack_deb_file"; fi
-   sudo apt update
+   sudo apt update >/dev/null
    sudo apt install -y pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome
    echo "Slack installed successfully."
 }
@@ -434,7 +451,7 @@ i_docker() {
       sudo apt remove -y "$pkg" >/dev/null 2>&1 || true
    done
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y ca-certificates curl gnupg
 
    sudo install -m 0755 -d /etc/apt/keyrings
@@ -459,7 +476,7 @@ i_docker() {
    echo "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_ASC_PATH}] ${DOCKER_REPO_URL} ${codename} stable" \
       | sudo tee $DOCKER_LIST_PATH >/dev/null
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y \
       docker-ce docker-ce-cli containerd.io \
       docker-buildx-plugin docker-compose-plugin
@@ -536,26 +553,38 @@ i_postman() {
       return 0
    fi
 
-   local postman_deb_file="postman-linux-x64.deb"
-   if [[ -f "$postman_deb_file" ]]; then rm -f "$postman_deb_file"; fi
+   local postman_tar_file="postman-linux-x64.tar.xz"
+   if [[ -f "$postman_tar_file" ]]; then rm -f "$postman_tar_file"; fi
 
-   # postman
-   wget "https://dl.pstmn.io/download/latest/linux_64" -O "$postman_deb_file"
+   # # postman
+   wget "https://dl.pstmn.io/download/latest/linux_64" -O "$postman_tar_file"
 
-   if [[ ! -f "$postman_deb_file" ]]; then
+   if [[ ! -f "$postman_tar_file" ]]; then
       echo "Failed to download Postman .deb file."
       return 1
    fi
 
-   if sudo apt-get install -y "$postman_deb_file"; then
-      :
-   else
-      # Fallback for older setups: dpkg then fix deps
-      sudo dpkg -i "$postman_deb_file" || true
-      sudo apt-get -f install -y
-   fi
+   tar -xf "$postman_tar_file"
+   sudo rm -rf /opt/postman || true
+   sudo mv Postman /opt/postman
+   sudo ln -sf /opt/postman/Postman /usr/local/bin/postman
 
-   if [[ -f "$postman_deb_file" ]]; then rm -f "$postman_deb_file"; fi
+   mkdir -p "$HOME/.local/share/applications"
+   echo "[Desktop Entry]
+Type=Application
+Name=Postman
+Comment=API platform for building and using APIs
+Exec=/opt/postman/Postman
+Icon=/opt/postman/app/resources/app/assets/icon.png
+Terminal=false
+Categories=Development;
+StartupNotify=true
+" | sudo tee "$HOME/.local/share/applications/postman.desktop"
+
+   sudo chmod +x "$HOME/.local/share/applications/postman.desktop"
+   sudo update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+
+   if [[ -f "$postman_tar_file" ]]; then rm -f "$postman_tar_file"; fi
    echo "Postman installed successfully."
 }
 
@@ -565,9 +594,10 @@ i_telegram() {
       return 0
    fi
 
-   sudo add-apt-repository ppa:atareao/telegram -y
-   sudo apt-get update -y
-   sudo apt-get install telegram -y
+   wget https://telegram.org/dl/desktop/linux -O telegram.tar.xz
+   tar -xf telegram.tar.xz
+   sudo mv Telegram /opt/telegram
+   sudo ln -s /opt/telegram/Telegram /usr/local/bin/telegram
    echo "Telegram installed successfully."
 }
 
@@ -585,7 +615,7 @@ i_pgadmin4() {
    local codename
    codename="$(lsb_release -cs)"
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y ca-certificates curl gnupg lsb-release
    sudo install -d -m 0755 "$KEYRING_DIR"
 
@@ -599,7 +629,7 @@ i_pgadmin4() {
    echo "deb [signed-by=${PGADMIN_KEYRING_PATH}] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/${codename} pgadmin4 main" \
       | sudo tee "$PGADMIN_LIST_PATH" >/dev/null
 
-   sudo apt update -y
+   sudo apt update -y >/dev/null
    sudo apt install -y pgadmin4-desktop
 }
 
@@ -622,15 +652,6 @@ i_docker
 i_postman
 i_pgadmin4
 
-cmdArgs=("$@")
-isMysqlArg=0
-
-for arg in "${cmdArgs[@]}"; do
-   if [[ "$arg" == "--mysql" ]]; then
-      isMysqlArg=1
-      break
-   fi
-done
 
 
 if [[ $isMysqlArg -eq 1 ]]; then
