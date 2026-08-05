@@ -20,7 +20,7 @@
 #
 set -euo pipefail
 
-HC_VERSION="1.0.0"
+HC_VERSION="1.0.1"
 HC_INSTALL_PATH="${HC_INSTALL_PATH:-/usr/local/bin/hc}"
 HC_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 
@@ -45,7 +45,7 @@ COOKIE_NAME=""
 COOKIE_DOMAIN=""
 GATE_ENABLED=0
 
-log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
+log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -441,6 +441,7 @@ resolve_or_issue_cert() {
         --keep-until-expiring \
         --cert-name "${host}" \
         -d "${host}" \
+        >&2 \
         || warn "certbot keep-until-expiring reported an issue (continuing)"
     fi
     printf '%s\n' "${host}"
@@ -449,7 +450,7 @@ resolve_or_issue_cert() {
 
   log "Issuing Let's Encrypt certificate for ${host}"
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "(dry-run) certbot certonly -d ${host}"
+    echo "(dry-run) certbot certonly -d ${host}" >&2
     printf '%s\n' "${host}"
     return 0
   fi
@@ -461,6 +462,7 @@ resolve_or_issue_cert() {
     --keep-until-expiring \
     --cert-name "${host}" \
     -d "${host}" \
+    >&2 \
     || die "certbot failed for ${host} — check DNS, port 80, and Cloudflare SSL mode"
 
   printf '%s\n' "${host}"
@@ -549,9 +551,8 @@ cmd_add() {
   write_http_vhost "${HOSTNAME}" "${PORT}"
   reload_apache
 
-  local cert_name
-  cert_name="$(resolve_or_issue_cert "${HOSTNAME}")"
-  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${cert_name}"
+  resolve_or_issue_cert "${HOSTNAME}" >/dev/null
+  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${HOSTNAME}"
   reload_apache
 
   log "https://${HOSTNAME}/ → http://${BACKEND}:${PORT}/"
@@ -690,17 +691,16 @@ cmd_renew_ssl() {
   load_backend_from_vhost
   resolve_gate "${HOSTNAME}"
 
-  local cert_name
-  cert_name="$(resolve_or_issue_cert "${HOSTNAME}")"
+  resolve_or_issue_cert "${HOSTNAME}" >/dev/null
   if [[ "${DRY_RUN}" -eq 0 ]]; then
-    certbot renew --cert-name "${cert_name}" --force-renewal 2>/dev/null \
+    certbot renew --cert-name "${HOSTNAME}" --force-renewal >&2 2>/dev/null \
       || certbot certonly --apache --non-interactive --agree-tos \
-           --email "${CERTBOT_EMAIL}" --cert-name "${cert_name}" -d "${HOSTNAME}" \
-           --force-renewal || warn "renew returned non-zero"
+           --email "${CERTBOT_EMAIL}" --cert-name "${HOSTNAME}" -d "${HOSTNAME}" \
+           --force-renewal >&2 || warn "renew returned non-zero"
   fi
   write_gate_snippet "${HOSTNAME}"
   write_http_vhost "${HOSTNAME}" "${PORT}"
-  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${cert_name}"
+  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${HOSTNAME}"
   reload_apache
   log "SSL refreshed for ${HOSTNAME}"
 }
