@@ -20,7 +20,7 @@
 #
 set -euo pipefail
 
-HC_VERSION="1.0.1"
+HC_VERSION="1.1.0"
 HC_INSTALL_PATH="${HC_INSTALL_PATH:-/usr/local/bin/hc}"
 HC_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 
@@ -65,6 +65,7 @@ Manage hosts:
   sudo hc -l
   sudo hc -s HOST
   sudo hc -r HOST
+  hc -q HOST                 print yes/no (exit 0/1) if site is configured & running
 
 Options:
   -a HOST     Add or update reverse-proxy vhost (+ SSL)
@@ -72,6 +73,7 @@ Options:
   -l          List hc-managed vhosts
   -s HOST     Show Apache config, gate, backend, cert
   -r HOST     Force-renew / reinstall SSL for HOST
+  -q HOST     Check: print "yes" if vhost exists, enabled, and backend is listening; else "no"
   -p PORT     Backend port (prompted if omitted on -a)
   -b ADDR     Backend address (default: ${BACKEND_DEFAULT})
   -e EMAIL    Certbot contact email (saved to ${HC_CONFIG})
@@ -88,7 +90,7 @@ Options:
 Examples:
   sudo hc -a api.example.com -p 8080 -e admin@example.com
   sudo hc -a app.example.com -p 3000 -g
-  sudo hc -a app.example.com -p 3000 -G
+  hc -q app.example.com && echo already up
   sudo hc -d app.example.com
 
 Notes:
@@ -705,6 +707,53 @@ cmd_renew_ssl() {
   log "SSL refreshed for ${HOSTNAME}"
 }
 
+# Print "yes" or "no" — exit 0 if configured + enabled + backend listening, else 1.
+# Safe for scripts:  if hc -q app.example.com; then …; fi
+cmd_check() {
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+
+  local http ssl
+  http="$(site_http "${HOSTNAME}")"
+  ssl="$(site_ssl "${HOSTNAME}")"
+
+  if [[ ! -f "${http}" ]] || ! is_managed "${HOSTNAME}"; then
+    echo "no"
+    return 1
+  fi
+
+  if [[ ! -L "${SITES_ENABLED}/${HOSTNAME}.conf" && ! -e "${SITES_ENABLED}/${HOSTNAME}.conf" ]]; then
+    echo "no"
+    return 1
+  fi
+
+  # Prefer SSL site enabled when present
+  if [[ -f "${ssl}" ]] && [[ ! -L "${SITES_ENABLED}/${HOSTNAME}-le-ssl.conf" && ! -e "${SITES_ENABLED}/${HOSTNAME}-le-ssl.conf" ]]; then
+    echo "no"
+    return 1
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet apache2 2>/dev/null && ! systemctl is-active --quiet httpd 2>/dev/null; then
+      echo "no"
+      return 1
+    fi
+  fi
+
+  local backend_line port addr
+  backend_line="$(grep -m1 '^# Backend:' "${http}" 2>/dev/null || true)"
+  port="$(echo "${backend_line}" | sed -E 's/.*:([0-9]+)$/\1/')"
+  addr="$(echo "${backend_line}" | sed -E 's/^# Backend:[[:space:]]*([^:]+):.*/\1/')"
+  addr="${addr:-127.0.0.1}"
+
+  if [[ -z "${port}" ]] || ! backend_listening "${port}"; then
+    echo "no"
+    return 1
+  fi
+
+  echo "yes"
+  return 0
+}
+
 # --- entry: subcommands before getopts ---
 case "${1:-}" in
   install)
@@ -728,13 +777,14 @@ case "${1:-}" in
     ;;
 esac
 
-while getopts ':a:d:ls:r:p:b:e:k:c:C:gGnwyh' opt; do
+while getopts ':a:d:ls:r:q:p:b:e:k:c:C:gGnwyh' opt; do
   case "${opt}" in
     a) ACTION="add"; HOSTNAME="${OPTARG}" ;;
     d) ACTION="delete"; HOSTNAME="${OPTARG}" ;;
     l) ACTION="list" ;;
     s) ACTION="show"; HOSTNAME="${OPTARG}" ;;
     r) ACTION="renew"; HOSTNAME="${OPTARG}" ;;
+    q) ACTION="check"; HOSTNAME="${OPTARG}" ;;
     p) PORT="${OPTARG}" ;;
     b) BACKEND="${OPTARG}" ;;
     e) CERTBOT_EMAIL="${OPTARG}" ;;
@@ -765,5 +815,11 @@ case "${ACTION}" in
   list)   cmd_list ;;
   show)   cmd_show ;;
   renew)  cmd_renew_ssl ;;
+  check)
+    if cmd_check; then
+      exit 0
+    fi
+    exit 1
+    ;;
   *) die "Unknown action" ;;
 esac

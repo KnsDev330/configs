@@ -44,7 +44,20 @@ sudo hc -d app.example.com
 
 Re-running `-a` for the same host updates the backend/port/gate and refreshes certs safely.
 
-## Cookie gate (`-g`)
+## Check site (`-q`)
+
+```bash
+hc -q app.example.com
+# yes  → vhost exists, enabled, apache up, backend port listening (exit 0)
+# no   → otherwise (exit 1)
+
+if hc -q app.example.com; then
+  echo already running
+else
+  sudo hc -a app.example.com -p 3000 -g -y
+fi
+```
+
 
 | | |
 |--|--|
