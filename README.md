@@ -1546,6 +1546,42 @@ get user id from `id` command
 </details>
 
 
+<details>
+<summary>Install hc (Apache reverse-proxy + Let's Encrypt)</summary>
+
+Installs the full `hc` tool to `/usr/local/bin/hc` so every user can run `sudo hc …` on a new VPS (no manual Apache/certbot vhost copy-paste).
+
+Source file in this repo: [`hc`](./hc) — docs: [`hc.md`](./hc.md)
+
+**From this repo (after clone):**
+```bash
+sudo ./hc install
+hc version
+```
+
+**One-liner on a fresh VPS (no clone needed):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/KnsDev330/configs/main/hc \
+  | sudo tee /usr/local/bin/hc >/dev/null \
+  && sudo chmod 755 /usr/local/bin/hc \
+  && sudo mkdir -p /etc/hc \
+  && hc version
+```
+
+**Typical use:**
+```bash
+sudo hc -e admin@example.com -a app.example.com -p 3000
+sudo hc -a app.example.com -p 3000 -g          # cookie gate
+sudo hc -a api.example.com -p 8080 -g
+sudo hc -l
+sudo hc -s app.example.com
+sudo hc -d app.example.com
+```
+
+Cloudflare SSL/TLS must be **Full** or **Full (strict)** (not Flexible).
+</details>
+
+
 
 
 
