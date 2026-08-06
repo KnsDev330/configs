@@ -28,9 +28,15 @@ hc version
 Installs to `/usr/local/bin/hc` (on the default `sudo` secure path). Any user can run `sudo hc …`.
 
 ```bash
+sudo hc update              # refresh binary from GitHub (when run as installed hc)
+sudo ./hc update            # install this local checkout over /usr/local/bin/hc
+sudo hc update --remote     # force GitHub download
+sudo hc update --local      # force install from the file you invoked
 sudo hc uninstall           # remove binary, keep /etc/hc
 sudo hc uninstall --purge   # also delete /etc/hc
 ```
+
+Override download URL with `HC_UPDATE_URL` if needed.
 
 ## Quick start
 

@@ -14,6 +14,7 @@
 #   sudo hc -l
 #   sudo hc -s app.example.com
 #   sudo hc -r app.example.com
+#   sudo hc update             # refresh installed binary (GitHub or local)
 #   sudo hc uninstall
 #   hc version
 #
@@ -22,8 +23,9 @@
 #
 set -euo pipefail
 
-HC_VERSION="1.2.0"
+HC_VERSION="1.2.1"
 HC_INSTALL_PATH="${HC_INSTALL_PATH:-/usr/local/bin/hc}"
+HC_UPDATE_URL="${HC_UPDATE_URL:-https://raw.githubusercontent.com/KnsDev330/configs/main/hc}"
 HC_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 
 SITES_AVAILABLE="/etc/apache2/sites-available"
@@ -60,6 +62,10 @@ hc ${HC_VERSION} — idempotent Apache reverse-proxy / static vhost + Let's Encr
 
 Install:
   sudo ./hc install              install to ${HC_INSTALL_PATH}
+  sudo hc update                 update installed hc (from GitHub)
+  sudo ./hc update               update from this local file
+  sudo hc update --remote        force download from GitHub
+  sudo hc update --local         force install from this file
   sudo hc uninstall              remove ${HC_INSTALL_PATH} (keeps /etc/hc)
   sudo hc uninstall --purge      also remove /etc/hc state
   hc version
@@ -668,11 +674,29 @@ load_site_from_vhost() {
   BACKEND="${BACKEND:-127.0.0.1}"
 }
 
+is_same_path() {
+  local a="$1" b="$2"
+  [[ -e "${a}" && -e "${b}" ]] || return 1
+  [[ "${a}" -ef "${b}" ]] 2>/dev/null && return 0
+  [[ "$(readlink -f "${a}" 2>/dev/null || true)" == "$(readlink -f "${b}" 2>/dev/null || true)" ]]
+}
+
+installed_version() {
+  if [[ -x "${HC_INSTALL_PATH}" ]]; then
+    "${HC_INSTALL_PATH}" version 2>/dev/null | awk '/^hc /{print $2; exit}'
+  fi
+}
+
+parse_version_file() {
+  local file="$1"
+  sed -n 's/^HC_VERSION="\([^"]*\)".*/\1/p' "${file}" | head -1
+}
+
 cmd_install() {
   need_root "install"
-  if [[ "${HC_SELF}" -ef "${HC_INSTALL_PATH}" ]] 2>/dev/null \
-    || [[ "$(readlink -f "${HC_SELF}")" == "$(readlink -f "${HC_INSTALL_PATH}" 2>/dev/null || true)" ]]; then
+  if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
     log "Already installed at ${HC_INSTALL_PATH} (v${HC_VERSION})"
+    echo "  Tip: sudo hc update   # pull latest from GitHub"
     return 0
   fi
   install -d -m 755 "$(dirname "${HC_INSTALL_PATH}")"
@@ -683,8 +707,76 @@ cmd_install() {
   echo
   echo "  sudo hc -e you@example.com -a app.example.com -p 3000"
   echo "  sudo hc -a site.example.com -S -g"
+  echo "  sudo hc update"
   echo "  sudo hc -l"
   command -v hc >/dev/null 2>&1 || warn "${HC_INSTALL_PATH} may not be on PATH for this shell — open a new shell or use full path"
+}
+
+# Replace ${HC_INSTALL_PATH} with a newer hc.
+#   sudo hc update            → download from GitHub (when run from installed path)
+#   sudo ./hc update          → install this local file (when run from a checkout)
+#   sudo hc update --remote   → always GitHub
+#   sudo hc update --local    → always this file (HC_SELF)
+cmd_update() {
+  local mode="" arg="${1:-}"
+  case "${arg}" in
+    "" ) mode="" ;;
+    --remote|remote) mode="remote" ;;
+    --local|local) mode="local" ;;
+    -h|--help|help)
+      echo "usage: sudo hc update [--remote|--local]"
+      echo "  --remote  download ${HC_UPDATE_URL}"
+      echo "  --local   install from ${HC_SELF}"
+      return 0
+      ;;
+    *) die "usage: sudo hc update [--remote|--local]" ;;
+  esac
+  need_root "update"
+
+  if [[ -z "${mode}" ]]; then
+    if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
+      mode="remote"
+    else
+      mode="local"
+    fi
+  fi
+
+  local old_ver tmp new_ver
+  old_ver="$(installed_version || true)"
+  old_ver="${old_ver:-none}"
+  tmp="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${tmp}'" RETURN
+
+  if [[ "${mode}" == "local" ]]; then
+    log "Updating ${HC_INSTALL_PATH} from local ${HC_SELF}"
+    [[ -f "${HC_SELF}" ]] || die "local source missing: ${HC_SELF}"
+    if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
+      die "already running the installed binary — use: sudo hc update --remote"
+    fi
+    cp -f "${HC_SELF}" "${tmp}"
+  else
+    log "Updating ${HC_INSTALL_PATH} from ${HC_UPDATE_URL}"
+    command -v curl >/dev/null 2>&1 || die "curl required for remote update"
+    curl -fsSL "${HC_UPDATE_URL}" -o "${tmp}" \
+      || die "download failed — check network / ${HC_UPDATE_URL}"
+  fi
+
+  head -1 "${tmp}" | grep -qE '^#!' || die "update source is not a script"
+  grep -q '^HC_VERSION=' "${tmp}" || die "update source does not look like hc"
+  new_ver="$(parse_version_file "${tmp}")"
+  [[ -n "${new_ver}" ]] || die "could not parse HC_VERSION from update source"
+
+  # Quick syntax check before replacing the live binary
+  bash -n "${tmp}" || die "update source failed bash -n"
+
+  install -d -m 755 "$(dirname "${HC_INSTALL_PATH}")"
+  install -m 755 "${tmp}" "${HC_INSTALL_PATH}"
+  mkdir -p "${HC_STATE_DIR}"
+  chmod 755 "${HC_STATE_DIR}"
+
+  log "Updated hc ${old_ver} → ${new_ver} (${mode})"
+  "${HC_INSTALL_PATH}" version
 }
 
 cmd_uninstall() {
@@ -977,6 +1069,11 @@ case "${1:-}" in
   install)
     shift
     cmd_install
+    exit 0
+    ;;
+  update)
+    shift
+    cmd_update "${1:-}"
     exit 0
     ;;
   uninstall)
