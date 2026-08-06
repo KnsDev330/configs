@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hc — Apache reverse-proxy + Let's Encrypt helper (idempotent)
+# hc — Apache reverse-proxy / static vhost + Let's Encrypt helper (idempotent)
 #
 # Install (once, as root):
 #   sudo ./hc install          # → /usr/local/bin/hc
@@ -8,6 +8,8 @@
 # Usage (any user with sudo):
 #   sudo hc -a app.example.com -p 3000
 #   sudo hc -a app.example.com -p 3000 -g
+#   sudo hc -a site.example.com -S -g          # DocumentRoot (no proxy)
+#   sudo hc -a site.example.com -S -R /var/www/html -g
 #   sudo hc -d app.example.com
 #   sudo hc -l
 #   sudo hc -s app.example.com
@@ -20,7 +22,7 @@
 #
 set -euo pipefail
 
-HC_VERSION="1.1.0"
+HC_VERSION="1.2.0"
 HC_INSTALL_PATH="${HC_INSTALL_PATH:-/usr/local/bin/hc}"
 HC_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 
@@ -30,8 +32,10 @@ HC_STATE_DIR="/etc/hc"
 HC_CONFIG="${HC_STATE_DIR}/config"
 
 BACKEND_DEFAULT="127.0.0.1"
+DOCROOT_DEFAULT="/var/www/html"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 BACKEND="${BACKEND_DEFAULT}"
+DOCROOT=""
 
 ACTION=""
 HOSTNAME=""
@@ -44,6 +48,7 @@ GATE_SECRET="${GATE_SECRET:-}"
 COOKIE_NAME=""
 COOKIE_DOMAIN=""
 GATE_ENABLED=0
+SITE_MODE=""           # "" | proxy | static  ("" = infer / preserve)
 
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -51,7 +56,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<EOF
-hc ${HC_VERSION} — idempotent Apache reverse-proxy + Let's Encrypt
+hc ${HC_VERSION} — idempotent Apache reverse-proxy / static vhost + Let's Encrypt
 
 Install:
   sudo ./hc install              install to ${HC_INSTALL_PATH}
@@ -61,6 +66,7 @@ Install:
 
 Manage hosts:
   sudo hc -a HOST [-p PORT] [-b ADDR] [-e EMAIL] [-g] [-k SECRET] …
+  sudo hc -a HOST -S [-R DIR] [-e EMAIL] [-g] [-k SECRET] …
   sudo hc -d HOST
   sudo hc -l
   sudo hc -s HOST
@@ -68,14 +74,16 @@ Manage hosts:
   hc -q HOST                 print yes/no (exit 0/1) if site is configured & running
 
 Options:
-  -a HOST     Add or update reverse-proxy vhost (+ SSL)
+  -a HOST     Add or update vhost (+ SSL)
   -d HOST     Delete HTTP/HTTPS vhosts for HOST
   -l          List hc-managed vhosts
-  -s HOST     Show Apache config, gate, backend, cert
+  -s HOST     Show Apache config, gate, backend/docroot, cert
   -r HOST     Force-renew / reinstall SSL for HOST
-  -q HOST     Check: print "yes" if vhost exists, enabled, and backend is listening; else "no"
-  -p PORT     Backend port (prompted if omitted on -a)
+  -q HOST     Check: print "yes" if vhost exists, enabled, and ready; else "no"
+  -p PORT     Backend port (proxy mode; prompted if omitted on -a)
   -b ADDR     Backend address (default: ${BACKEND_DEFAULT})
+  -S          Static mode: serve DocumentRoot (no reverse proxy)
+  -R DIR      DocumentRoot for -S (default: ${DOCROOT_DEFAULT})
   -e EMAIL    Certbot contact email (saved to ${HC_CONFIG})
   -g          Enable cookie gate
   -G          Disable cookie gate
@@ -83,18 +91,21 @@ Options:
   -c NAME     Gate cookie name (default: hc_gate)
   -C DOMAIN   Cookie Domain attribute (default: parent of HOST)
   -n          Dry-run
-  -w          Disable WebSocket proxy rules
+  -w          Disable WebSocket proxy rules (proxy mode only)
   -y          Non-interactive (no prompts)
   -h          Help
 
 Examples:
   sudo hc -a api.example.com -p 8080 -e admin@example.com
   sudo hc -a app.example.com -p 3000 -g
+  sudo hc -a badsha.example.com -S -g -k pass123 -c p
+  sudo hc -a docs.example.com -S -R /var/www/docs -g
   hc -q app.example.com && echo already up
   sudo hc -d app.example.com
 
 Notes:
-  • Idempotent: re-run -a to change port/gate/SSL safely
+  • Idempotent: re-run -a to change port/gate/SSL/mode safely
+  • Do NOT proxy to Apache itself (-p 80/-p 443 on localhost) — use -S instead
   • Cloudflare: SSL/TLS mode Full or Full (strict), not Flexible
   • Gate secrets: ${HC_STATE_DIR}/<host>.env (mode 600)
 EOF
@@ -172,6 +183,56 @@ host_has_gate() {
   [[ -f "${f}" ]] && grep -q '^# Gate: on' "${f}"
 }
 
+host_is_static() {
+  local f
+  f="$(site_http "$1")"
+  [[ -f "${f}" ]] && grep -qE '^# Mode:[[:space:]]*static' "${f}"
+}
+
+host_docroot() {
+  local f
+  f="$(site_http "$1")"
+  [[ -f "${f}" ]] || return 0
+  grep -m1 '^# DocumentRoot:' "${f}" 2>/dev/null | sed 's/^# DocumentRoot:[[:space:]]*//' || true
+}
+
+# Proxying to Apache's own :80/:443 on a local catch-all address causes redirect loops.
+is_self_proxy_target() {
+  local addr="$1" port="$2"
+  case "${port}" in
+    80|443) ;;
+    *) return 1 ;;
+  esac
+  case "${addr}" in
+    0.0.0.0|127.0.0.1|localhost|::|::1|\*|\[::\]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+refuse_self_proxy() {
+  if is_self_proxy_target "${BACKEND}" "${PORT}"; then
+    die "Refusing proxy to ${BACKEND}:${PORT} (Apache would loop on itself). Use: sudo hc -a ${HOSTNAME} -S … for a DocumentRoot site, or -p <app-port> for a real backend."
+  fi
+}
+
+ensure_docroot() {
+  local dir="$1"
+  [[ -n "${dir}" ]] || die "DocumentRoot required"
+  [[ "${dir}" == /* ]] || die "DocumentRoot must be absolute: ${dir}"
+  if [[ ! -d "${dir}" ]]; then
+    if [[ "${NO_PROMPT}" -eq 1 || "${DRY_RUN}" -eq 1 ]]; then
+      log "Creating DocumentRoot ${dir}"
+      [[ "${DRY_RUN}" -eq 1 ]] || mkdir -p "${dir}"
+    else
+      local ans=""
+      read -r -p "DocumentRoot ${dir} missing. Create it? [Y/n] " ans
+      [[ "${ans}" =~ ^[Nn]$ ]] && die "DocumentRoot missing: ${dir}"
+      mkdir -p "${dir}"
+    fi
+  fi
+  [[ "${DRY_RUN}" -eq 1 ]] || chmod 755 "${dir}" 2>/dev/null || true
+}
+
 derive_cookie_domain() {
   local host="$1"
   local rest="${host#*.}"
@@ -206,12 +267,38 @@ prompt_port() {
     return 0
   fi
   if [[ "${NO_PROMPT}" -eq 1 ]]; then
-    die "Port required: -p PORT"
+    die "Port required: -p PORT (or use -S for static DocumentRoot)"
   fi
   local answer=""
   read -r -p "Backend port for ${HOSTNAME} (on ${BACKEND}): " answer
   PORT="${answer}"
   valid_port "${PORT}" || die "Invalid port: ${PORT}"
+}
+
+resolve_site_mode() {
+  local host="$1"
+  if [[ "${SITE_MODE}" == "static" || "${SITE_MODE}" == "proxy" ]]; then
+    return 0
+  fi
+  if host_is_static "${host}"; then
+    SITE_MODE="static"
+  else
+    SITE_MODE="proxy"
+  fi
+}
+
+resolve_docroot() {
+  local host="$1"
+  if [[ -n "${DOCROOT}" ]]; then
+    return 0
+  fi
+  local existing=""
+  existing="$(host_docroot "${host}")"
+  if [[ -n "${existing}" ]]; then
+    DOCROOT="${existing}"
+  else
+    DOCROOT="${DOCROOT_DEFAULT}"
+  fi
 }
 
 resolve_gate() {
@@ -361,17 +448,67 @@ ws_block() {
 EOF
 }
 
+docroot_block() {
+  local dir="$1"
+  cat <<EOF
+    DocumentRoot ${dir}
+    <Directory ${dir}>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+EOF
+}
+
+site_meta_comments() {
+  local host="$1"
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    cat <<EOF
+# Mode: static
+# DocumentRoot: ${DOCROOT}
+EOF
+  else
+    cat <<EOF
+# Mode: proxy
+# Backend: ${BACKEND}:${PORT}
+EOF
+  fi
+  gate_meta_comments "${host}"
+}
+
 write_http_vhost() {
-  local host="$1" port="$2"
+  local host="$1"
   local conf
   conf="$(site_http "${host}")"
   log "Writing ${conf}"
-  [[ "${DRY_RUN}" -eq 1 ]] && { echo "(dry-run) HTTP ${host} → ${BACKEND}:${port}"; return 0; }
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    if [[ "${SITE_MODE}" == "static" ]]; then
+      echo "(dry-run) HTTP ${host} → DocumentRoot ${DOCROOT}"
+    else
+      echo "(dry-run) HTTP ${host} → ${BACKEND}:${PORT}"
+    fi
+    return 0
+  fi
 
-  cat > "${conf}" <<EOF
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    cat > "${conf}" <<EOF
 # Managed-by: hc
-# Backend: ${BACKEND}:${port}
-$(gate_meta_comments "${host}")
+$(site_meta_comments "${host}")
+# Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<VirtualHost *:80>
+    ServerName ${host}
+$(cloudflare_safe_https_block)
+$(gate_include_block "${host}")
+$(docroot_block "${DOCROOT}")
+    ErrorLog \${APACHE_LOG_DIR}/${host}-error.log
+    CustomLog \${APACHE_LOG_DIR}/${host}-access.log combined
+</VirtualHost>
+EOF
+  else
+    cat > "${conf}" <<EOF
+# Managed-by: hc
+$(site_meta_comments "${host}")
 # Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 <VirtualHost *:80>
@@ -381,18 +518,19 @@ $(gate_include_block "${host}")
     ProxyPreserveHost On
     ProxyRequests Off
     RequestHeader set X-Forwarded-Proto "http" early
-$(ws_block "${port}")
-    ProxyPass / http://${BACKEND}:${port}/
-    ProxyPassReverse / http://${BACKEND}:${port}/
+$(ws_block "${PORT}")
+    ProxyPass / http://${BACKEND}:${PORT}/
+    ProxyPassReverse / http://${BACKEND}:${PORT}/
     ErrorLog \${APACHE_LOG_DIR}/${host}-error.log
     CustomLog \${APACHE_LOG_DIR}/${host}-access.log combined
 </VirtualHost>
 EOF
+  fi
   a2ensite -q "${host}.conf" 2>/dev/null || a2ensite "${host}.conf"
 }
 
 write_ssl_vhost() {
-  local host="$1" port="$2" cert_name="$3"
+  local host="$1" cert_name="$2"
   local conf live
   conf="$(site_ssl "${host}")"
   live="/etc/letsencrypt/live/${cert_name}"
@@ -400,23 +538,18 @@ write_ssl_vhost() {
   log "Writing ${conf}"
   [[ "${DRY_RUN}" -eq 1 ]] && { echo "(dry-run) SSL ${host}"; return 0; }
 
-  cat > "${conf}" <<EOF
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    cat > "${conf}" <<EOF
 # Managed-by: hc
-# Backend: ${BACKEND}:${port}
+$(site_meta_comments "${host}")
 # Cert: ${cert_name}
-$(gate_meta_comments "${host}")
 # Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 <IfModule mod_ssl.c>
 <VirtualHost *:443>
     ServerName ${host}
 $(gate_include_block "${host}")
-    ProxyPreserveHost On
-    ProxyRequests Off
-    RequestHeader set X-Forwarded-Proto "https" early
-$(ws_block "${port}")
-    ProxyPass / http://${BACKEND}:${port}/
-    ProxyPassReverse / http://${BACKEND}:${port}/
+$(docroot_block "${DOCROOT}")
     SSLEngine on
     SSLCertificateFile ${live}/fullchain.pem
     SSLCertificateKeyFile ${live}/privkey.pem
@@ -426,6 +559,33 @@ $(ws_block "${port}")
 </VirtualHost>
 </IfModule>
 EOF
+  else
+    cat > "${conf}" <<EOF
+# Managed-by: hc
+$(site_meta_comments "${host}")
+# Cert: ${cert_name}
+# Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName ${host}
+$(gate_include_block "${host}")
+    ProxyPreserveHost On
+    ProxyRequests Off
+    RequestHeader set X-Forwarded-Proto "https" early
+$(ws_block "${PORT}")
+    ProxyPass / http://${BACKEND}:${PORT}/
+    ProxyPassReverse / http://${BACKEND}:${PORT}/
+    SSLEngine on
+    SSLCertificateFile ${live}/fullchain.pem
+    SSLCertificateKeyFile ${live}/privkey.pem
+    Include /etc/letsencrypt/options-ssl-apache.conf
+    ErrorLog \${APACHE_LOG_DIR}/${host}-ssl-error.log
+    CustomLog \${APACHE_LOG_DIR}/${host}-ssl-access.log combined
+</VirtualHost>
+</IfModule>
+EOF
+  fi
   a2ensite -q "${host}-le-ssl.conf" 2>/dev/null || a2ensite "${host}-le-ssl.conf"
 }
 
@@ -484,10 +644,24 @@ backend_listening() {
   ss -tln | awk -v p=":${port}" '$4 ~ p"$" { found=1 } END { exit !found }'
 }
 
-load_backend_from_vhost() {
+load_site_from_vhost() {
   local http backend_line
   http="$(site_http "${HOSTNAME}")"
+  [[ -f "${http}" ]] || die "Missing ${http}"
+
+  if host_is_static "${HOSTNAME}"; then
+    SITE_MODE="static"
+    DOCROOT="$(host_docroot "${HOSTNAME}")"
+    DOCROOT="${DOCROOT:-${DOCROOT_DEFAULT}}"
+    return 0
+  fi
+
+  SITE_MODE="proxy"
   backend_line="$(grep -m1 '^# Backend:' "${http}" || true)"
+  # Legacy vhosts may omit "# Mode: proxy"
+  if [[ -z "${backend_line}" ]]; then
+    die "Could not read Backend/DocumentRoot from ${http}"
+  fi
   PORT="$(echo "${backend_line}" | sed -E 's/.*:([0-9]+)$/\1/')"
   BACKEND="$(echo "${backend_line}" | sed -E 's/^# Backend:[[:space:]]*([^:]+):.*/\1/')"
   [[ -n "${PORT}" ]] || die "Could not read backend from ${http}"
@@ -508,6 +682,7 @@ cmd_install() {
   log "Installed hc ${HC_VERSION} → ${HC_INSTALL_PATH}"
   echo
   echo "  sudo hc -e you@example.com -a app.example.com -p 3000"
+  echo "  sudo hc -a site.example.com -S -g"
   echo "  sudo hc -l"
   command -v hc >/dev/null 2>&1 || warn "${HC_INSTALL_PATH} may not be on PATH for this shell — open a new shell or use full path"
 }
@@ -539,25 +714,37 @@ cmd_add() {
   valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
   load_config
   require_email
-  prompt_port
+  resolve_site_mode "${HOSTNAME}"
   ensure_apache_bits
   resolve_gate "${HOSTNAME}"
 
-  if backend_listening "${PORT}"; then
-    log "Backend OK: ${BACKEND}:${PORT}"
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    resolve_docroot "${HOSTNAME}"
+    ensure_docroot "${DOCROOT}"
+    log "Static site: DocumentRoot ${DOCROOT}"
   else
-    warn "Nothing listening on ${BACKEND}:${PORT} yet — creating vhost anyway"
+    prompt_port
+    refuse_self_proxy
+    if backend_listening "${PORT}"; then
+      log "Backend OK: ${BACKEND}:${PORT}"
+    else
+      warn "Nothing listening on ${BACKEND}:${PORT} yet — creating vhost anyway"
+    fi
   fi
 
   write_gate_snippet "${HOSTNAME}"
-  write_http_vhost "${HOSTNAME}" "${PORT}"
+  write_http_vhost "${HOSTNAME}"
   reload_apache
 
   resolve_or_issue_cert "${HOSTNAME}" >/dev/null
-  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${HOSTNAME}"
+  write_ssl_vhost "${HOSTNAME}" "${HOSTNAME}"
   reload_apache
 
-  log "https://${HOSTNAME}/ → http://${BACKEND}:${PORT}/"
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    log "https://${HOSTNAME}/ → DocumentRoot ${DOCROOT}"
+  else
+    log "https://${HOSTNAME}/ → http://${BACKEND}:${PORT}/"
+  fi
   if [[ "${GATE_ENABLED}" -eq 1 ]]; then
     echo "  Gate:   on (${COOKIE_NAME} @ ${COOKIE_DOMAIN})"
     echo "  Unlock: https://${HOSTNAME}/?${COOKIE_NAME}=${GATE_SECRET}"
@@ -614,15 +801,21 @@ cmd_delete() {
 
 cmd_list() {
   need_root "-l"
-  printf '%-32s %-22s %-5s %s\n' "HOST" "BACKEND" "SSL" "GATE"
-  printf '%-32s %-22s %-5s %s\n' "----" "-------" "---" "----"
-  local f host backend ssl gate
+  printf '%-32s %-28s %-5s %s\n' "HOST" "TARGET" "SSL" "GATE"
+  printf '%-32s %-28s %-5s %s\n' "----" "------" "---" "----"
+  local f host target ssl gate docroot
   shopt -s nullglob
   for f in "${SITES_AVAILABLE}"/*.conf; do
     [[ "${f}" == *"-le-ssl.conf" ]] && continue
     grep -qE 'Managed-by: (hc|hc\.sh|vhost-proxy\.sh)' "${f}" 2>/dev/null || continue
     host="$(basename "${f}" .conf)"
-    backend="$(grep -m1 '^# Backend:' "${f}" | sed 's/^# Backend:[[:space:]]*//')"
+    if grep -qE '^# Mode:[[:space:]]*static' "${f}"; then
+      docroot="$(grep -m1 '^# DocumentRoot:' "${f}" | sed 's/^# DocumentRoot:[[:space:]]*//')"
+      target="static:${docroot:-?}"
+    else
+      target="$(grep -m1 '^# Backend:' "${f}" | sed 's/^# Backend:[[:space:]]*//')"
+      target="${target:-?}"
+    fi
     if [[ -f "$(site_ssl "${host}")" ]] || [[ -L "${SITES_ENABLED}/${host}-le-ssl.conf" ]]; then
       ssl="yes"
     else
@@ -633,7 +826,7 @@ cmd_list() {
     else
       gate="off"
     fi
-    printf '%-32s %-22s %-5s %s\n' "${host}" "${backend:-?}" "${ssl}" "${gate}"
+    printf '%-32s %-28s %-5s %s\n' "${host}" "${target}" "${ssl}" "${gate}"
   done
 }
 
@@ -670,12 +863,25 @@ cmd_show() {
     warn "Gate on in vhost but missing ${genv}"
   fi
 
-  local port
-  port="$(grep -m1 '^# Backend:' "${http}" 2>/dev/null | sed -E 's/.*:([0-9]+)$/\1/' || true)"
-  if [[ -n "${port}" ]]; then
-    echo "=== Backend :${port} ==="
-    backend_listening "${port}" && echo "listening" || warn "nothing listening on :${port}"
+  if host_is_static "${HOSTNAME}"; then
+    local docroot
+    docroot="$(host_docroot "${HOSTNAME}")"
+    docroot="${docroot:-${DOCROOT_DEFAULT}}"
+    echo "=== DocumentRoot ${docroot} ==="
+    if [[ -d "${docroot}" ]]; then
+      echo "present"
+    else
+      warn "missing ${docroot}"
+    fi
     echo
+  else
+    local port
+    port="$(grep -m1 '^# Backend:' "${http}" 2>/dev/null | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+    if [[ -n "${port}" ]]; then
+      echo "=== Backend :${port} ==="
+      backend_listening "${port}" && echo "listening" || warn "nothing listening on :${port}"
+      echo
+    fi
   fi
 
   echo "=== Origin cert (SNI ${HOSTNAME}) ==="
@@ -690,7 +896,7 @@ cmd_renew_ssl() {
   load_config
   require_email
   ensure_apache_bits
-  load_backend_from_vhost
+  load_site_from_vhost
   resolve_gate "${HOSTNAME}"
 
   resolve_or_issue_cert "${HOSTNAME}" >/dev/null
@@ -701,8 +907,8 @@ cmd_renew_ssl() {
            --force-renewal >&2 || warn "renew returned non-zero"
   fi
   write_gate_snippet "${HOSTNAME}"
-  write_http_vhost "${HOSTNAME}" "${PORT}"
-  write_ssl_vhost "${HOSTNAME}" "${PORT}" "${HOSTNAME}"
+  write_http_vhost "${HOSTNAME}"
+  write_ssl_vhost "${HOSTNAME}" "${HOSTNAME}"
   reload_apache
   log "SSL refreshed for ${HOSTNAME}"
 }
@@ -737,6 +943,18 @@ cmd_check() {
       echo "no"
       return 1
     fi
+  fi
+
+  if host_is_static "${HOSTNAME}"; then
+    local docroot
+    docroot="$(host_docroot "${HOSTNAME}")"
+    docroot="${docroot:-${DOCROOT_DEFAULT}}"
+    if [[ ! -d "${docroot}" ]]; then
+      echo "no"
+      return 1
+    fi
+    echo "yes"
+    return 0
   fi
 
   local backend_line port addr
@@ -777,7 +995,7 @@ case "${1:-}" in
     ;;
 esac
 
-while getopts ':a:d:ls:r:q:p:b:e:k:c:C:gGnwyh' opt; do
+while getopts ':a:d:ls:r:q:p:b:e:k:c:C:R:gGnwySh' opt; do
   case "${opt}" in
     a) ACTION="add"; HOSTNAME="${OPTARG}" ;;
     d) ACTION="delete"; HOSTNAME="${OPTARG}" ;;
@@ -785,8 +1003,10 @@ while getopts ':a:d:ls:r:q:p:b:e:k:c:C:gGnwyh' opt; do
     s) ACTION="show"; HOSTNAME="${OPTARG}" ;;
     r) ACTION="renew"; HOSTNAME="${OPTARG}" ;;
     q) ACTION="check"; HOSTNAME="${OPTARG}" ;;
-    p) PORT="${OPTARG}" ;;
-    b) BACKEND="${OPTARG}" ;;
+    p) PORT="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy" ;;
+    b) BACKEND="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy" ;;
+    S) SITE_MODE="static" ;;
+    R) DOCROOT="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="static" ;;
     e) CERTBOT_EMAIL="${OPTARG}" ;;
     g) GATE_MODE="on" ;;
     G) GATE_MODE="off" ;;
@@ -803,8 +1023,16 @@ while getopts ':a:d:ls:r:q:p:b:e:k:c:C:gGnwyh' opt; do
 done
 shift $((OPTIND - 1)) || true
 
-if [[ "${ACTION}" == "add" && -z "${PORT}" && ${#} -ge 1 ]]; then
+if [[ "${ACTION}" == "add" && "${SITE_MODE}" != "static" && -z "${PORT}" && ${#} -ge 1 ]]; then
   PORT="$1"
+  [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy"
+fi
+
+if [[ "${SITE_MODE}" == "static" && -n "${PORT}" ]]; then
+  warn "-S (static) ignores -p ${PORT}"
+fi
+if [[ "${SITE_MODE}" == "proxy" && -n "${DOCROOT}" ]]; then
+  warn "proxy mode ignores -R ${DOCROOT} (use -S for DocumentRoot)"
 fi
 
 [[ -n "${ACTION}" ]] || { usage; exit 1; }

@@ -1,6 +1,13 @@
 # hc
 
-Idempotent **Apache** reverse-proxy helper with **Let's Encrypt** SSL and an optional cookie gate. Aimed at Node (and similar) apps behind Cloudflare.
+Idempotent **Apache** helper with **Let's Encrypt** SSL and an optional cookie gate.
+
+Two site modes:
+
+1. **Proxy** (default) — reverse-proxy to a local Node (or similar) backend  
+2. **Static** (`-S`) — serve a `DocumentRoot` directly (no proxy; use this instead of `-p 80`)
+
+Aimed at apps behind Cloudflare.
 
 ## Install
 
@@ -37,18 +44,24 @@ sudo hc -a app.example.com -p 3000 -g
 # API sibling
 sudo hc -a api.example.com -p 8080 -g
 
+# Static / default DocumentRoot site (NOT -p 80 — that loops)
+sudo hc -a badsha.example.com -S -g -k pass123 -c p -y
+sudo hc -a docs.example.com -S -R /var/www/docs -g
+
 sudo hc -l
 sudo hc -s app.example.com
 sudo hc -d app.example.com
 ```
 
-Re-running `-a` for the same host updates the backend/port/gate and refreshes certs safely.
+Re-running `-a` for the same host updates the backend/port/docroot/gate and refreshes certs safely.
 
 ## Check site (`-q`)
 
 ```bash
 hc -q app.example.com
-# yes  → vhost exists, enabled, apache up, backend port listening (exit 0)
+# yes  → vhost exists, enabled, apache up, and ready
+#        proxy: backend port listening
+#        static: DocumentRoot directory exists
 # no   → otherwise (exit 1)
 
 if hc -q app.example.com; then
@@ -84,8 +97,10 @@ Use SSL/TLS **Full** or **Full (strict)** — not **Flexible** (Flexible + origi
 | `-l` | List managed hosts |
 | `-s HOST` | Show config |
 | `-r HOST` | Renew SSL |
-| `-p PORT` | Backend port |
+| `-p PORT` | Backend port (proxy mode) |
 | `-b ADDR` | Backend address (default `127.0.0.1`) |
+| `-S` | Static mode — DocumentRoot, no reverse proxy |
+| `-R DIR` | DocumentRoot for `-S` (default `/var/www/html`) |
 | `-e EMAIL` | Certbot email |
 | `-g` / `-G` | Gate on / off |
 | `-k SECRET` | Gate secret |
@@ -94,6 +109,27 @@ Use SSL/TLS **Full** or **Full (strict)** — not **Flexible** (Flexible + origi
 | `-n` | Dry-run |
 | `-w` | No WebSocket proxy |
 | `-y` | Non-interactive |
+
+## Why not `-p 80`?
+
+`hc` is a reverse proxy by default. Pointing it at Apache itself:
+
+```bash
+# WRONG — ERR_TOO_MANY_REDIRECTS
+sudo hc -a site.example.com -p 80 -b 0.0.0.0 -g
+```
+
+…proxies HTTPS → HTTP `:80` → HTTPS redirect → loop.
+
+For a plain Apache/static site (default web root, landing page, etc.):
+
+```bash
+sudo hc -a site.example.com -S -g -k pass123 -c p -y
+# optional custom root:
+sudo hc -a site.example.com -S -R /var/www/site -g -y
+```
+
+`hc` also **refuses** proxy targets like `127.0.0.1:80` / `0.0.0.0:80` and tells you to use `-S`.
 
 ## Layout
 
@@ -113,7 +149,8 @@ Vhosts are tagged `# Managed-by: hc` so `-d` / `-l` only touch sites this tool o
 - Debian/Ubuntu-style Apache 2 (`a2enmod`, `a2ensite`)
 - `certbot` + `python3-certbot-apache` (auto-installed if missing)
 - DNS for `HOST` pointing at the server
-- Backend process listening on the given port (or start it after)
+- Proxy mode: backend process listening on the given port (or start it after)
+- Static mode: DocumentRoot directory (created on request if missing)
 
 ## License
 
