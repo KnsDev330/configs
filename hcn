@@ -1,0 +1,1248 @@
+#!/usr/bin/env bash
+# hcn — Nginx reverse-proxy / static vhost + Let's Encrypt helper (idempotent)
+#
+# Install (once, as root):
+#   sudo ./hcn install          # → /usr/local/bin/hcn
+#   sudo hcn -e you@domain.tld  # optional: save default certbot email
+#
+# Usage (any user with sudo):
+#   sudo hcn -a app.example.com -p 3000
+#   sudo hcn -a app.example.com -p 3000 -g
+#   sudo hcn -a site.example.com -S -g          # root (no proxy)
+#   sudo hcn -a site.example.com -S -R /var/www/html -g
+#   sudo hcn -d app.example.com
+#   sudo hcn -l
+#   sudo hcn -s app.example.com
+#   sudo hcn -r app.example.com
+#   sudo hcn update             # refresh installed binary (GitHub or local)
+#   sudo hcn uninstall
+#   hcn version
+#
+# Cookie gate (-g): cookie or ?cookie=secret unlocks; else 403.
+# ACME HTTP-01 bypasses the gate. Safe behind Cloudflare Full (strict).
+#
+set -euo pipefail
+
+HC_VERSION="1.0.0"
+HC_INSTALL_PATH="${HC_INSTALL_PATH:-/usr/local/bin/hcn}"
+HC_UPDATE_URL="${HC_UPDATE_URL:-https://raw.githubusercontent.com/KnsDev330/configs/main/hcn}"
+HC_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+
+SITES_AVAILABLE="/etc/nginx/sites-available"
+SITES_ENABLED="/etc/nginx/sites-enabled"
+NGINX_CONFD="/etc/nginx/conf.d"
+NGINX_SNIPPETS="/etc/nginx/snippets"
+HC_STATE_DIR="/etc/hcn"
+HC_CONFIG="${HC_STATE_DIR}/config"
+HC_APACHE_CONFIG="/etc/hc/config"
+
+BACKEND_DEFAULT="127.0.0.1"
+DOCROOT_DEFAULT="/var/www/html"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+BACKEND="${BACKEND_DEFAULT}"
+DOCROOT=""
+
+ACTION=""
+HOSTNAME=""
+PORT=""
+DRY_RUN=0
+NO_WS=0
+NO_PROMPT=0
+GATE_MODE="preserve"   # preserve | on | off
+GATE_SECRET="${GATE_SECRET:-}"
+COOKIE_NAME=""
+COOKIE_DOMAIN=""
+GATE_ENABLED=0
+SITE_MODE=""           # "" | proxy | static  ("" = infer / preserve)
+
+log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+hcn ${HC_VERSION} — idempotent Nginx reverse-proxy / static vhost + Let's Encrypt
+
+Install:
+  sudo ./hcn install              install to ${HC_INSTALL_PATH}
+  sudo hcn update                 update installed hcn (from GitHub)
+  sudo ./hcn update               update from this local file
+  sudo hcn update --remote        force download from GitHub
+  sudo hcn update --local         force install from this file
+  sudo hcn uninstall              remove ${HC_INSTALL_PATH} (keeps ${HC_STATE_DIR})
+  sudo hcn uninstall --purge      also remove ${HC_STATE_DIR}
+  hcn version
+
+Manage hosts:
+  sudo hcn -a HOST [-p PORT] [-b ADDR] [-e EMAIL] [-g] [-k SECRET] …
+  sudo hcn -a HOST -S [-R DIR] [-e EMAIL] [-g] [-k SECRET] …
+  sudo hcn -d HOST
+  sudo hcn -l
+  sudo hcn -s HOST
+  sudo hcn -r HOST
+  hcn -q HOST                     print yes/no (exit 0/1) if site is configured & running
+
+Options:
+  -a HOST     Add or update server block (+ SSL)
+  -d HOST     Delete HTTP/HTTPS server block for HOST
+  -l          List hcn-managed sites
+  -s HOST     Show Nginx config, gate, backend/root, cert
+  -r HOST     Force-renew / reinstall SSL for HOST
+  -q HOST     Check: print "yes" if site exists, enabled, and ready; else "no"
+  -p PORT     Backend port (proxy mode; prompted if omitted on -a)
+  -b ADDR     Backend address (default: ${BACKEND_DEFAULT})
+  -S          Static mode: serve root directory (no reverse proxy)
+  -R DIR      Document root for -S (default: ${DOCROOT_DEFAULT})
+  -e EMAIL    Certbot contact email (saved to ${HC_CONFIG})
+  -g          Enable cookie gate
+  -G          Disable cookie gate
+  -k SECRET   Gate secret (default: reuse saved or generate)
+  -c NAME     Gate cookie name (default: hc_gate)
+  -C DOMAIN   Cookie Domain attribute (default: parent of HOST)
+  -n          Dry-run
+  -w          Disable WebSocket proxy headers (proxy mode only)
+  -y          Non-interactive (no prompts)
+  -h          Help
+
+Examples:
+  sudo hcn -a api.example.com -p 8080 -e admin@example.com
+  sudo hcn -a app.example.com -p 3000 -g
+  sudo hcn -a badsha.example.com -S -g -k pass123 -c p
+  sudo hcn -a docs.example.com -S -R /var/www/docs -g
+  hcn -q app.example.com && echo already up
+  sudo hcn -d app.example.com
+
+Notes:
+  • Idempotent: re-run -a to change port/gate/SSL/mode safely
+  • Do NOT proxy to Nginx itself (-p 80/-p 443 on localhost) — use -S instead
+  • Cloudflare: SSL/TLS mode Full or Full (strict), not Flexible
+  • Gate secrets: ${HC_STATE_DIR}/<host>.env (mode 600)
+EOF
+}
+
+need_root() {
+  [[ ${EUID} -eq 0 ]] || die "root required — try: sudo hcn ${*:-…}"
+}
+
+load_config() {
+  mkdir -p "${HC_STATE_DIR}" 2>/dev/null || true
+  if [[ -f "${HC_CONFIG}" ]]; then
+    # shellcheck disable=SC1090
+    set -a
+    # shellcheck source=/dev/null
+    source "${HC_CONFIG}"
+    set +a
+  elif [[ -f "${HC_APACHE_CONFIG}" ]]; then
+    # Fallback: reuse email saved by hc if present
+    # shellcheck disable=SC1090
+    set -a
+    # shellcheck source=/dev/null
+    source "${HC_APACHE_CONFIG}"
+    set +a
+  fi
+  CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+}
+
+save_config_email() {
+  local email="$1"
+  [[ -n "${email}" ]] || return 0
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) would save CERTBOT_EMAIL to ${HC_CONFIG}"
+    return 0
+  fi
+  mkdir -p "${HC_STATE_DIR}"
+  if [[ -f "${HC_CONFIG}" ]] && grep -q '^CERTBOT_EMAIL=' "${HC_CONFIG}"; then
+    sed -i "s/^CERTBOT_EMAIL=.*/CERTBOT_EMAIL=${email}/" "${HC_CONFIG}"
+  else
+    printf 'CERTBOT_EMAIL=%s\n' "${email}" >> "${HC_CONFIG}"
+  fi
+  chmod 600 "${HC_CONFIG}"
+}
+
+require_email() {
+  if [[ -n "${CERTBOT_EMAIL}" ]]; then
+    save_config_email "${CERTBOT_EMAIL}"
+    return 0
+  fi
+  if [[ "${NO_PROMPT}" -eq 1 ]]; then
+    die "Certbot email required: -e you@example.com (or set CERTBOT_EMAIL / ${HC_CONFIG})"
+  fi
+  local answer=""
+  read -r -p "Certbot email: " answer
+  CERTBOT_EMAIL="${answer}"
+  [[ -n "${CERTBOT_EMAIL}" ]] || die "email required"
+  save_config_email "${CERTBOT_EMAIL}"
+}
+
+valid_hostname() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+}
+
+valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1 && "$1" <= 65535 ))
+}
+
+site_avail()    { echo "${SITES_AVAILABLE}/${1}.conf"; }
+site_enabled()  { echo "${SITES_ENABLED}/${1}.conf"; }
+gate_conf()     { echo "${NGINX_CONFD}/hcn-gate-${1}.conf"; }
+gate_snippet()  { echo "${NGINX_SNIPPETS}/hcn-gate-${1}.conf"; }
+gate_env_file() { echo "${HC_STATE_DIR}/${1}.env"; }
+common_conf()   { echo "${NGINX_CONFD}/hcn-common.conf"; }
+ssl_snippet()   { echo "${NGINX_SNIPPETS}/hcn-ssl-params.conf"; }
+
+gate_var_id() {
+  local host="$1" slug hash
+  slug="$(printf '%s' "${host}" | tr -c 'A-Za-z0-9_' '_' | sed 's/^_//; s/_$//')"
+  hash="$(printf '%s' "${host}" | cksum | awk '{print $1}')"
+  echo "${slug}_${hash}"
+}
+
+is_managed() {
+  local f
+  f="$(site_avail "$1")"
+  [[ -f "${f}" ]] && grep -qE 'Managed-by: (hcn|hc)' "${f}"
+}
+
+host_has_gate() {
+  local f
+  f="$(site_avail "$1")"
+  [[ -f "${f}" ]] && grep -q '^# Gate: on' "${f}"
+}
+
+host_is_static() {
+  local f
+  f="$(site_avail "$1")"
+  [[ -f "${f}" ]] && grep -qE '^# Mode:[[:space:]]*static' "${f}"
+}
+
+host_docroot() {
+  local f
+  f="$(site_avail "$1")"
+  [[ -f "${f}" ]] || return 0
+  grep -m1 '^# DocumentRoot:' "${f}" 2>/dev/null | sed 's/^# DocumentRoot:[[:space:]]*//' || true
+}
+
+host_has_ssl() {
+  local f
+  f="$(site_avail "$1")"
+  [[ -f "${f}" ]] && grep -qE '^# SSL:[[:space:]]*on|listen[[:space:]]+443' "${f}"
+}
+
+# Proxying to Nginx's own :80/:443 on a local catch-all address causes redirect loops.
+is_self_proxy_target() {
+  local addr="$1" port="$2"
+  case "${port}" in
+    80|443) ;;
+    *) return 1 ;;
+  esac
+  case "${addr}" in
+    0.0.0.0|127.0.0.1|localhost|::|::1|\*|\[::\]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+refuse_self_proxy() {
+  if is_self_proxy_target "${BACKEND}" "${PORT}"; then
+    die "Refusing proxy to ${BACKEND}:${PORT} (Nginx would loop on itself). Use: sudo hcn -a ${HOSTNAME} -S … for a static root site, or -p <app-port> for a real backend."
+  fi
+}
+
+format_upstream_host() {
+  local addr="$1"
+  if [[ "${addr}" == *:* && "${addr}" != \[*\] ]]; then
+    echo "[${addr}]"
+  else
+    echo "${addr}"
+  fi
+}
+
+ensure_docroot() {
+  local dir="$1"
+  [[ -n "${dir}" ]] || die "DocumentRoot required"
+  [[ "${dir}" == /* ]] || die "DocumentRoot must be absolute: ${dir}"
+  if [[ ! -d "${dir}" ]]; then
+    if [[ "${NO_PROMPT}" -eq 1 || "${DRY_RUN}" -eq 1 ]]; then
+      log "Creating DocumentRoot ${dir}"
+      [[ "${DRY_RUN}" -eq 1 ]] || mkdir -p "${dir}"
+    else
+      local ans=""
+      read -r -p "DocumentRoot ${dir} missing. Create it? [Y/n] " ans
+      [[ "${ans}" =~ ^[Nn]$ ]] && die "DocumentRoot missing: ${dir}"
+      mkdir -p "${dir}"
+    fi
+  fi
+  [[ "${DRY_RUN}" -eq 1 ]] || chmod 755 "${dir}" 2>/dev/null || true
+}
+
+derive_cookie_domain() {
+  local host="$1"
+  local rest="${host#*.}"
+  if [[ "${rest}" == "${host}" || "${rest}" != *.* ]]; then
+    echo ".${host}"
+  else
+    echo ".${rest}"
+  fi
+}
+
+nginx_supports_http2_directive() {
+  local ver major minor patch
+  ver="$(nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9.]*\).*/\1/p' | head -1)"
+  [[ -n "${ver}" ]] || return 1
+  IFS='.' read -r major minor patch <<< "${ver}"
+  major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+  (( major > 1 )) && return 0
+  (( major == 1 && minor > 25 )) && return 0
+  (( major == 1 && minor == 25 && patch >= 1 )) && return 0
+  return 1
+}
+
+ensure_nginx_bits() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) ensure nginx + certbot installed and common snippets written"
+    return 0
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  if ! command -v nginx >/dev/null 2>&1; then
+    log "Installing nginx"
+    apt-get update -qq
+    apt-get install -y -qq nginx
+  fi
+  if ! command -v certbot >/dev/null 2>&1 || ! certbot plugins 2>/dev/null | grep -q 'nginx'; then
+    log "Installing certbot + python3-certbot-nginx"
+    apt-get update -qq
+    apt-get install -y -qq certbot python3-certbot-nginx
+  fi
+  mkdir -p "${SITES_AVAILABLE}" "${SITES_ENABLED}" "${NGINX_CONFD}" "${NGINX_SNIPPETS}" /var/www/html
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+
+  cat > "$(common_conf)" <<'EOF'
+# Managed-by: hcn — shared maps for WebSocket upgrade handling
+map $http_upgrade $hcn_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+EOF
+  chmod 644 "$(common_conf)"
+
+  cat > "$(ssl_snippet)" <<'EOF'
+# Managed-by: hcn — fallback TLS parameters when certbot options-ssl-nginx.conf is absent
+ssl_session_cache shared:hcn_SSL:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+EOF
+  chmod 644 "$(ssl_snippet)"
+}
+
+prompt_port() {
+  if [[ -n "${PORT}" ]]; then
+    valid_port "${PORT}" || die "Invalid port: ${PORT}"
+    return 0
+  fi
+  if [[ "${NO_PROMPT}" -eq 1 ]]; then
+    die "Port required: -p PORT (or use -S for static DocumentRoot)"
+  fi
+  local answer=""
+  read -r -p "Backend port for ${HOSTNAME} (on ${BACKEND}): " answer
+  PORT="${answer}"
+  valid_port "${PORT}" || die "Invalid port: ${PORT}"
+}
+
+resolve_site_mode() {
+  local host="$1"
+  if [[ "${SITE_MODE}" == "static" || "${SITE_MODE}" == "proxy" ]]; then
+    return 0
+  fi
+  if host_is_static "${host}"; then
+    SITE_MODE="static"
+  else
+    SITE_MODE="proxy"
+  fi
+}
+
+resolve_docroot() {
+  local host="$1"
+  if [[ -n "${DOCROOT}" ]]; then
+    return 0
+  fi
+  local existing=""
+  existing="$(host_docroot "${host}")"
+  if [[ -n "${existing}" ]]; then
+    DOCROOT="${existing}"
+  else
+    DOCROOT="${DOCROOT_DEFAULT}"
+  fi
+}
+
+resolve_gate() {
+  local host="$1"
+  local envf
+  envf="$(gate_env_file "${host}")"
+  GATE_ENABLED=0
+
+  local cli_secret="${GATE_SECRET}"
+  local cli_cookie="${COOKIE_NAME}"
+  local cli_domain="${COOKIE_DOMAIN}"
+
+  case "${GATE_MODE}" in
+    off) GATE_ENABLED=0; return 0 ;;
+    on)  GATE_ENABLED=1 ;;
+    preserve)
+      if host_has_gate "${host}" || [[ -f "${envf}" ]]; then
+        GATE_ENABLED=1
+      else
+        GATE_ENABLED=0
+        return 0
+      fi
+      ;;
+  esac
+
+  if [[ -f "${envf}" ]]; then
+    # shellcheck disable=SC1090
+    set -a
+    # shellcheck source=/dev/null
+    source "${envf}"
+    set +a
+  fi
+
+  [[ -n "${cli_secret}" ]] && GATE_SECRET="${cli_secret}"
+  [[ -n "${cli_cookie}" ]] && COOKIE_NAME="${cli_cookie}"
+  [[ -n "${cli_domain}" ]] && COOKIE_DOMAIN="${cli_domain}"
+
+  COOKIE_NAME="${COOKIE_NAME:-hc_gate}"
+  COOKIE_DOMAIN="${COOKIE_DOMAIN:-$(derive_cookie_domain "${host}")}"
+  if [[ -z "${GATE_SECRET}" ]]; then
+    GATE_SECRET="$(openssl rand -hex 16)"
+    log "Generated new GATE_SECRET for ${host}"
+  fi
+
+  [[ "${GATE_SECRET}" =~ ^[A-Za-z0-9_-]+$ ]] || die "GATE_SECRET must be [A-Za-z0-9_-]+"
+  [[ "${COOKIE_NAME}" =~ ^[A-Za-z0-9_]+$ ]] || die "Invalid cookie name: ${COOKIE_NAME}"
+}
+
+save_gate_env() {
+  local host="$1"
+  local envf
+  envf="$(gate_env_file "${host}")"
+  [[ "${DRY_RUN}" -eq 1 ]] && { echo "(dry-run) save ${envf}"; return 0; }
+  mkdir -p "${HC_STATE_DIR}"
+  cat > "${envf}" <<EOF
+# Managed by hcn — keep private
+GATE_SECRET=${GATE_SECRET}
+COOKIE_NAME=${COOKIE_NAME}
+COOKIE_DOMAIN=${COOKIE_DOMAIN}
+EOF
+  chmod 600 "${envf}"
+}
+
+write_gate_files() {
+  local host="$1"
+  local cpath spath id
+  cpath="$(gate_conf "${host}")"
+  spath="$(gate_snippet "${host}")"
+  id="$(gate_var_id "${host}")"
+
+  log "Writing gate config ${cpath} + ${spath}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) gate cookie=${COOKIE_NAME} domain=${COOKIE_DOMAIN}"
+    return 0
+  fi
+
+  cat > "${cpath}" <<EOF
+# Managed-by: hcn — HTTP-level maps for ${host} gate
+map \$cookie_${COOKIE_NAME} \$hcn_gate_cookie_${id} {
+    default 0;
+    "~^${GATE_SECRET}$" 1;
+}
+map \$arg_${COOKIE_NAME} \$hcn_gate_arg_${id} {
+    default 0;
+    "~^${GATE_SECRET}$" 1;
+}
+map "\${hcn_gate_cookie_${id}}\${hcn_gate_arg_${id}}" \$hcn_gate_deny_${id} {
+    default 1;
+    "10" 0;
+    "01" 0;
+    "11" 0;
+}
+map \$hcn_gate_arg_${id} \$hcn_gate_set_${id} {
+    default "";
+    "1" "${COOKIE_NAME}=${GATE_SECRET}; Path=/; Domain=${COOKIE_DOMAIN}; Max-Age=604800; Secure; HttpOnly; SameSite=Lax";
+}
+EOF
+  chmod 640 "${cpath}"
+
+  cat > "${spath}" <<EOF
+# Managed-by: hcn — Included inside location / for ${host}
+if (\$hcn_gate_deny_${id}) {
+    return 403;
+}
+add_header Set-Cookie \$hcn_gate_set_${id} always;
+EOF
+  chmod 640 "${spath}"
+
+  save_gate_env "${host}"
+}
+
+remove_gate_files() {
+  local host="$1"
+  local cpath spath
+  cpath="$(gate_conf "${host}")"
+  spath="$(gate_snippet "${host}")"
+  if [[ -f "${cpath}" || -f "${spath}" ]]; then
+    log "Removing gate files for ${host}"
+    [[ "${DRY_RUN}" -eq 1 ]] || rm -f "${cpath}" "${spath}"
+  fi
+}
+
+gate_include_block() {
+  local host="$1"
+  if [[ "${GATE_ENABLED}" -eq 1 ]]; then
+    echo "        include ${NGINX_SNIPPETS}/hcn-gate-${host}.conf;"
+  fi
+}
+
+gate_meta_comments() {
+  local host="$1"
+  if [[ "${GATE_ENABLED}" -eq 1 ]]; then
+    cat <<EOF
+# Gate: on
+# Gate-cookie: ${COOKIE_NAME}
+# Gate-domain: ${COOKIE_DOMAIN}
+# Gate-secret-file: $(gate_env_file "${host}")
+EOF
+  else
+    echo "# Gate: off"
+  fi
+}
+
+site_meta_comments() {
+  local host="$1" ssl_flag="$2" cert_name="${3:-}"
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    cat <<EOF
+# Mode: static
+# DocumentRoot: ${DOCROOT}
+EOF
+  else
+    cat <<EOF
+# Mode: proxy
+# Backend: ${BACKEND}:${PORT}
+EOF
+  fi
+  gate_meta_comments "${host}"
+  echo "# SSL: ${ssl_flag}"
+  [[ -n "${cert_name}" ]] && echo "# Cert: ${cert_name}"
+  echo "# Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+ws_headers_block() {
+  [[ "${NO_WS}" -eq 1 ]] && return 0
+  cat <<'EOF'
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $hcn_connection_upgrade;
+EOF
+}
+
+location_handler_block() {
+  local host="$1" scheme="$2"
+  local upstream
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    cat <<EOF
+        try_files \$uri \$uri/ =404;
+EOF
+  else
+    upstream="$(format_upstream_host "${BACKEND}")"
+    cat <<EOF
+        proxy_pass http://${upstream}:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto ${scheme};
+$(ws_headers_block)
+EOF
+  fi
+}
+
+ssl_includes_block() {
+  if [[ -f /etc/letsencrypt/options-ssl-nginx.conf ]]; then
+    echo "    include /etc/letsencrypt/options-ssl-nginx.conf;"
+  else
+    echo "    include ${NGINX_SNIPPETS}/hcn-ssl-params.conf;"
+  fi
+  if [[ -f /etc/letsencrypt/ssl-dhparams.pem ]]; then
+    echo "    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;"
+  fi
+}
+
+ssl_listen_block() {
+  if nginx_supports_http2_directive; then
+    cat <<'EOF'
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+EOF
+  else
+    cat <<'EOF'
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+EOF
+  fi
+}
+
+write_site_conf() {
+  local host="$1" with_ssl="$2" cert_name="${3:-$1}"
+  local conf live ssl_flag="off"
+  conf="$(site_avail "${host}")"
+  live="/etc/letsencrypt/live/${cert_name}"
+
+  local cert_meta=""
+  if [[ "${with_ssl}" -eq 1 ]]; then
+    [[ "${DRY_RUN}" -eq 1 || -f "${live}/fullchain.pem" ]] || die "Cert missing: ${live}/fullchain.pem"
+    ssl_flag="on"
+    cert_meta="${cert_name}"
+  fi
+
+  log "Writing ${conf} (SSL: ${ssl_flag})"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    if [[ "${SITE_MODE}" == "static" ]]; then
+      echo "(dry-run) ${host} (SSL=${ssl_flag}) → root ${DOCROOT}"
+    else
+      echo "(dry-run) ${host} (SSL=${ssl_flag}) → http://${BACKEND}:${PORT}"
+    fi
+    return 0
+  fi
+
+  local root_line=""
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    root_line="    root ${DOCROOT};
+    index index.html index.htm;"
+  fi
+
+  {
+    echo "# Managed-by: hcn"
+    site_meta_comments "${host}" "${ssl_flag}" "${cert_meta}"
+    cat <<EOF
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${host};
+
+    access_log /var/log/nginx/${host}-access.log;
+    error_log  /var/log/nginx/${host}-error.log;
+${root_line:+
+${root_line}}
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+        # Skip redirect when Cloudflare already terminated TLS (X-Forwarded-Proto: https)
+        if (\$http_x_forwarded_proto !~* ^https\$) {
+            return 301 https://\$host\$request_uri;
+        }
+$(gate_include_block "${host}")
+$(location_handler_block "${host}" "https")
+    }
+}
+EOF
+
+    if [[ "${with_ssl}" -eq 1 ]]; then
+      cat <<EOF
+
+server {
+$(ssl_listen_block)
+    server_name ${host};
+
+    ssl_certificate     ${live}/fullchain.pem;
+    ssl_certificate_key ${live}/privkey.pem;
+$(ssl_includes_block)
+
+    access_log /var/log/nginx/${host}-ssl-access.log;
+    error_log  /var/log/nginx/${host}-ssl-error.log;
+${root_line:+
+${root_line}}
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+$(gate_include_block "${host}")
+$(location_handler_block "${host}" "https")
+    }
+}
+EOF
+    fi
+  } > "${conf}"
+
+  ln -sfn "${conf}" "$(site_enabled "${host}")"
+}
+
+resolve_or_issue_cert() {
+  local host="$1"
+  local live="/etc/letsencrypt/live/${host}"
+
+  if [[ -f "${live}/fullchain.pem" ]]; then
+    log "Cert already present: ${live}"
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+      certbot certonly --nginx \
+        --non-interactive --agree-tos \
+        --email "${CERTBOT_EMAIL}" \
+        --keep-until-expiring \
+        --cert-name "${host}" \
+        -d "${host}" \
+        >&2 \
+        || warn "certbot keep-until-expiring reported an issue (continuing)"
+    fi
+    printf '%s\n' "${host}"
+    return 0
+  fi
+
+  log "Issuing Let's Encrypt certificate for ${host}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) certbot certonly --nginx -d ${host}" >&2
+    printf '%s\n' "${host}"
+    return 0
+  fi
+
+  certbot certonly --nginx \
+    --non-interactive --agree-tos \
+    --email "${CERTBOT_EMAIL}" \
+    --keep-until-expiring \
+    --cert-name "${host}" \
+    -d "${host}" \
+    >&2 \
+    || die "certbot failed for ${host} — check DNS, port 80, and Cloudflare SSL mode"
+
+  printf '%s\n' "${host}"
+}
+
+reload_nginx() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) nginx -t && systemctl reload nginx"
+    return 0
+  fi
+  nginx -t
+  systemctl reload nginx
+}
+
+backend_listening() {
+  local port="$1"
+  ss -tln | awk -v p=":${port}" '$4 ~ p"$" { found=1 } END { exit !found }'
+}
+
+load_site_from_conf() {
+  local conf backend_line
+  conf="$(site_avail "${HOSTNAME}")"
+  [[ -f "${conf}" ]] || die "Missing ${conf}"
+
+  if host_is_static "${HOSTNAME}"; then
+    SITE_MODE="static"
+    DOCROOT="$(host_docroot "${HOSTNAME}")"
+    DOCROOT="${DOCROOT:-${DOCROOT_DEFAULT}}"
+    return 0
+  fi
+
+  SITE_MODE="proxy"
+  backend_line="$(grep -m1 '^# Backend:' "${conf}" || true)"
+  if [[ -z "${backend_line}" ]]; then
+    die "Could not read Backend/DocumentRoot from ${conf}"
+  fi
+  PORT="$(echo "${backend_line}" | sed -E 's/.*:([0-9]+)$/\1/')"
+  BACKEND="$(echo "${backend_line}" | sed -E 's/^# Backend:[[:space:]]*([^:]+):.*/\1/')"
+  [[ -n "${PORT}" ]] || die "Could not read backend from ${conf}"
+  BACKEND="${BACKEND:-127.0.0.1}"
+}
+
+is_same_path() {
+  local a="$1" b="$2"
+  [[ -e "${a}" && -e "${b}" ]] || return 1
+  [[ "${a}" -ef "${b}" ]] 2>/dev/null && return 0
+  [[ "$(readlink -f "${a}" 2>/dev/null || true)" == "$(readlink -f "${b}" 2>/dev/null || true)" ]]
+}
+
+installed_version() {
+  if [[ -x "${HC_INSTALL_PATH}" ]]; then
+    "${HC_INSTALL_PATH}" version 2>/dev/null | awk '/^hcn /{print $2; exit}'
+  fi
+}
+
+parse_version_file() {
+  local file="$1"
+  sed -n 's/^HC_VERSION="\([^"]*\)".*/\1/p' "${file}" | head -1
+}
+
+cmd_install() {
+  need_root "install"
+  if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
+    log "Already installed at ${HC_INSTALL_PATH} (v${HC_VERSION})"
+    echo "  Tip: sudo hcn update   # pull latest from GitHub"
+    return 0
+  fi
+  install -d -m 755 "$(dirname "${HC_INSTALL_PATH}")"
+  install -m 755 "${HC_SELF}" "${HC_INSTALL_PATH}"
+  mkdir -p "${HC_STATE_DIR}"
+  chmod 755 "${HC_STATE_DIR}"
+  log "Installed hcn ${HC_VERSION} → ${HC_INSTALL_PATH}"
+  echo
+  echo "  sudo hcn -e you@example.com -a app.example.com -p 3000"
+  echo "  sudo hcn -a site.example.com -S -g"
+  echo "  sudo hcn update"
+  echo "  sudo hcn -l"
+  command -v hcn >/dev/null 2>&1 || warn "${HC_INSTALL_PATH} may not be on PATH for this shell — open a new shell or use full path"
+}
+
+cmd_update() {
+  local mode="" arg="${1:-}"
+  case "${arg}" in
+    "" ) mode="" ;;
+    --remote|remote) mode="remote" ;;
+    --local|local) mode="local" ;;
+    -h|--help|help)
+      echo "usage: sudo hcn update [--remote|--local]"
+      echo "  --remote  download ${HC_UPDATE_URL}"
+      echo "  --local   install from ${HC_SELF}"
+      return 0
+      ;;
+    *) die "usage: sudo hcn update [--remote|--local]" ;;
+  esac
+  need_root "update"
+
+  if [[ -z "${mode}" ]]; then
+    if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
+      mode="remote"
+    else
+      mode="local"
+    fi
+  fi
+
+  local old_ver tmp new_ver
+  old_ver="$(installed_version || true)"
+  old_ver="${old_ver:-none}"
+  tmp="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${tmp}'" RETURN
+
+  if [[ "${mode}" == "local" ]]; then
+    log "Updating ${HC_INSTALL_PATH} from local ${HC_SELF}"
+    [[ -f "${HC_SELF}" ]] || die "local source missing: ${HC_SELF}"
+    if is_same_path "${HC_SELF}" "${HC_INSTALL_PATH}"; then
+      die "already running the installed binary — use: sudo hcn update --remote"
+    fi
+    cp -f "${HC_SELF}" "${tmp}"
+  else
+    log "Updating ${HC_INSTALL_PATH} from ${HC_UPDATE_URL}"
+    command -v curl >/dev/null 2>&1 || die "curl required for remote update"
+    curl -fsSL "${HC_UPDATE_URL}" -o "${tmp}" \
+      || die "download failed — check network / ${HC_UPDATE_URL}"
+  fi
+
+  head -1 "${tmp}" | grep -qE '^#!' || die "update source is not a script"
+  grep -q '^HC_VERSION=' "${tmp}" || die "update source does not look like hcn"
+  new_ver="$(parse_version_file "${tmp}")"
+  [[ -n "${new_ver}" ]] || die "could not parse HC_VERSION from update source"
+
+  bash -n "${tmp}" || die "update source failed bash -n"
+
+  install -d -m 755 "$(dirname "${HC_INSTALL_PATH}")"
+  install -m 755 "${tmp}" "${HC_INSTALL_PATH}"
+  mkdir -p "${HC_STATE_DIR}"
+  chmod 755 "${HC_STATE_DIR}"
+
+  log "Updated hcn ${old_ver} → ${new_ver} (${mode})"
+  "${HC_INSTALL_PATH}" version
+}
+
+cmd_uninstall() {
+  need_root "uninstall"
+  local purge=0
+  [[ "${1:-}" == "--purge" ]] && purge=1
+
+  if [[ -e "${HC_INSTALL_PATH}" ]]; then
+    rm -f "${HC_INSTALL_PATH}"
+    log "Removed ${HC_INSTALL_PATH}"
+  else
+    warn "Not installed at ${HC_INSTALL_PATH}"
+  fi
+
+  if [[ "${purge}" -eq 1 ]]; then
+    if [[ -d "${HC_STATE_DIR}" ]]; then
+      rm -rf "${HC_STATE_DIR}"
+      log "Purged ${HC_STATE_DIR}"
+    fi
+  else
+    echo "  State kept in ${HC_STATE_DIR} (use: sudo hcn uninstall --purge)"
+  fi
+}
+
+cmd_add() {
+  need_root "-a"
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+  load_config
+  require_email
+  resolve_site_mode "${HOSTNAME}"
+  ensure_nginx_bits
+  resolve_gate "${HOSTNAME}"
+
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    resolve_docroot "${HOSTNAME}"
+    ensure_docroot "${DOCROOT}"
+    log "Static site: root ${DOCROOT}"
+  else
+    prompt_port
+    refuse_self_proxy
+    if backend_listening "${PORT}"; then
+      log "Backend OK: ${BACKEND}:${PORT}"
+    else
+      warn "Nothing listening on ${BACKEND}:${PORT} yet — creating server block anyway"
+    fi
+  fi
+
+  local cert_present=0
+  [[ -f "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" ]] && cert_present=1
+
+  # Write gate files BEFORE referencing them in site conf; remove AFTER detaching from site conf.
+  if [[ "${GATE_ENABLED}" -eq 1 ]]; then
+    write_gate_files "${HOSTNAME}"
+  fi
+
+  write_site_conf "${HOSTNAME}" "${cert_present}" "${HOSTNAME}"
+
+  if [[ "${GATE_ENABLED}" -ne 1 ]]; then
+    remove_gate_files "${HOSTNAME}"
+  fi
+
+  reload_nginx
+
+  resolve_or_issue_cert "${HOSTNAME}" >/dev/null
+  if [[ "${cert_present}" -eq 0 ]]; then
+    write_site_conf "${HOSTNAME}" 1 "${HOSTNAME}"
+    reload_nginx
+  fi
+
+  if [[ "${SITE_MODE}" == "static" ]]; then
+    log "https://${HOSTNAME}/ → root ${DOCROOT}"
+  else
+    log "https://${HOSTNAME}/ → http://${BACKEND}:${PORT}/"
+  fi
+  if [[ "${GATE_ENABLED}" -eq 1 ]]; then
+    echo "  Gate:   on (${COOKIE_NAME} @ ${COOKIE_DOMAIN})"
+    echo "  Unlock: https://${HOSTNAME}/?${COOKIE_NAME}=${GATE_SECRET}"
+    echo "  Secret: $(gate_env_file "${HOSTNAME}")"
+  else
+    echo "  Gate:   off"
+  fi
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    echo | openssl s_client -connect 127.0.0.1:443 -servername "${HOSTNAME}" 2>/dev/null \
+      | openssl x509 -noout -subject -dates 2>/dev/null || true
+  fi
+}
+
+cmd_delete() {
+  need_root "-d"
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+
+  local conf enabled gconf gsnip genv
+  conf="$(site_avail "${HOSTNAME}")"
+  enabled="$(site_enabled "${HOSTNAME}")"
+  gconf="$(gate_conf "${HOSTNAME}")"
+  gsnip="$(gate_snippet "${HOSTNAME}")"
+  genv="$(gate_env_file "${HOSTNAME}")"
+
+  if [[ ! -f "${conf}" && ! -L "${enabled}" && ! -e "${enabled}" ]]; then
+    warn "No server block for ${HOSTNAME}"
+    return 0
+  fi
+
+  if [[ -f "${conf}" ]] && ! is_managed "${HOSTNAME}"; then
+    if [[ "${NO_PROMPT}" -eq 1 ]]; then
+      die "${conf} is not managed by hcn (refusing -y)"
+    fi
+    local ans=""
+    read -r -p "${HOSTNAME} is not tagged Managed-by hcn. Delete anyway? [y/N] " ans
+    [[ "${ans}" =~ ^[Yy]$ ]] || die "Aborted"
+  fi
+
+  log "Removing ${HOSTNAME}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "(dry-run) delete site + gate"
+    return 0
+  fi
+
+  rm -f "${enabled}" "${conf}" "${gconf}" "${gsnip}" "${genv}"
+  reload_nginx
+
+  warn "Let's Encrypt files kept. To remove: sudo certbot delete --cert-name ${HOSTNAME}"
+  log "Deleted ${HOSTNAME}"
+}
+
+cmd_list() {
+  need_root "-l"
+  printf '%-32s %-28s %-5s %s\n' "HOST" "TARGET" "SSL" "GATE"
+  printf '%-32s %-28s %-5s %s\n' "----" "------" "---" "----"
+  local f host target ssl gate docroot
+  shopt -s nullglob
+  for f in "${SITES_AVAILABLE}"/*.conf; do
+    grep -qE 'Managed-by: (hcn|hc)' "${f}" 2>/dev/null || continue
+    host="$(basename "${f}" .conf)"
+    if grep -qE '^# Mode:[[:space:]]*static' "${f}"; then
+      docroot="$(grep -m1 '^# DocumentRoot:' "${f}" | sed 's/^# DocumentRoot:[[:space:]]*//')"
+      target="static:${docroot:-?}"
+    else
+      target="$(grep -m1 '^# Backend:' "${f}" | sed 's/^# Backend:[[:space:]]*//')"
+      target="${target:-?}"
+    fi
+    if grep -qE '^# SSL:[[:space:]]*on|listen[[:space:]]+443' "${f}"; then
+      ssl="yes"
+    else
+      ssl="no"
+    fi
+    if grep -q '^# Gate: on' "${f}"; then
+      gate="on"
+    else
+      gate="off"
+    fi
+    printf '%-32s %-28s %-5s %s\n' "${host}" "${target}" "${ssl}" "${gate}"
+  done
+}
+
+cmd_show() {
+  need_root "-s"
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+  local conf gconf gsnip genv
+  conf="$(site_avail "${HOSTNAME}")"
+  gconf="$(gate_conf "${HOSTNAME}")"
+  gsnip="$(gate_snippet "${HOSTNAME}")"
+  genv="$(gate_env_file "${HOSTNAME}")"
+
+  echo "=== Nginx ==="
+  nginx -t 2>&1 || true
+  if [[ -L "$(site_enabled "${HOSTNAME}")" ]]; then
+    echo "enabled: $(site_enabled "${HOSTNAME}") -> $(readlink -f "$(site_enabled "${HOSTNAME}")" 2>/dev/null || true)"
+  else
+    warn "Not enabled in ${SITES_ENABLED}"
+  fi
+  echo
+  [[ -f "${conf}" ]] && { echo "=== ${conf} ==="; cat "${conf}"; echo; } || warn "Missing ${conf}"
+  [[ -f "${gconf}" ]] && { echo "=== ${gconf} ==="; cat "${gconf}"; echo; }
+  [[ -f "${gsnip}" ]] && { echo "=== ${gsnip} ==="; cat "${gsnip}"; echo; }
+
+  if [[ -f "${genv}" ]]; then
+    echo "=== Gate ${genv} ==="
+    # shellcheck disable=SC1090
+    set -a
+    # shellcheck source=/dev/null
+    source "${genv}"
+    set +a
+    echo "COOKIE_NAME=${COOKIE_NAME:-}"
+    echo "COOKIE_DOMAIN=${COOKIE_DOMAIN:-}"
+    if [[ -n "${GATE_SECRET:-}" ]]; then
+      echo "GATE_SECRET=${GATE_SECRET:0:4}… (${#GATE_SECRET} chars)"
+      echo "Unlock: https://${HOSTNAME}/?${COOKIE_NAME}=<secret>"
+      echo "Full:   sudo grep GATE_SECRET ${genv}"
+    fi
+    echo
+  elif host_has_gate "${HOSTNAME}"; then
+    warn "Gate on in site conf but missing ${genv}"
+  fi
+
+  if host_is_static "${HOSTNAME}"; then
+    local docroot
+    docroot="$(host_docroot "${HOSTNAME}")"
+    docroot="${docroot:-${DOCROOT_DEFAULT}}"
+    echo "=== DocumentRoot ${docroot} ==="
+    if [[ -d "${docroot}" ]]; then
+      echo "present"
+    else
+      warn "missing ${docroot}"
+    fi
+    echo
+  else
+    local port
+    port="$(grep -m1 '^# Backend:' "${conf}" 2>/dev/null | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+    if [[ -n "${port}" ]]; then
+      echo "=== Backend :${port} ==="
+      backend_listening "${port}" && echo "listening" || warn "nothing listening on :${port}"
+      echo
+    fi
+  fi
+
+  echo "=== Origin cert (SNI ${HOSTNAME}) ==="
+  echo | openssl s_client -connect 127.0.0.1:443 -servername "${HOSTNAME}" 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -dates 2>/dev/null || warn "no cert presented"
+}
+
+cmd_renew_ssl() {
+  need_root "-r"
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+  [[ -f "$(site_avail "${HOSTNAME}")" ]] || die "No server block for ${HOSTNAME} — run -a first"
+  load_config
+  require_email
+  ensure_nginx_bits
+  load_site_from_conf
+  resolve_gate "${HOSTNAME}"
+
+  resolve_or_issue_cert "${HOSTNAME}" >/dev/null
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    certbot renew --cert-name "${HOSTNAME}" --force-renewal >&2 2>/dev/null \
+      || certbot certonly --nginx --non-interactive --agree-tos \
+           --email "${CERTBOT_EMAIL}" --cert-name "${HOSTNAME}" -d "${HOSTNAME}" \
+           --force-renewal >&2 || warn "renew returned non-zero"
+  fi
+  if [[ "${GATE_ENABLED}" -eq 1 ]]; then
+    write_gate_files "${HOSTNAME}"
+  fi
+  write_site_conf "${HOSTNAME}" 1 "${HOSTNAME}"
+  if [[ "${GATE_ENABLED}" -ne 1 ]]; then
+    remove_gate_files "${HOSTNAME}"
+  fi
+  reload_nginx
+  log "SSL refreshed for ${HOSTNAME}"
+}
+
+# Print "yes" or "no" — exit 0 if configured + enabled + backend listening, else 1.
+# Safe for scripts:  if hcn -q app.example.com; then …; fi
+cmd_check() {
+  valid_hostname "${HOSTNAME}" || die "Invalid hostname: ${HOSTNAME}"
+
+  local conf enabled
+  conf="$(site_avail "${HOSTNAME}")"
+  enabled="$(site_enabled "${HOSTNAME}")"
+
+  if [[ ! -f "${conf}" ]] || ! is_managed "${HOSTNAME}"; then
+    echo "no"
+    return 1
+  fi
+
+  if [[ ! -L "${enabled}" && ! -e "${enabled}" ]]; then
+    echo "no"
+    return 1
+  fi
+
+  if ! host_has_ssl "${HOSTNAME}"; then
+    echo "no"
+    return 1
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet nginx 2>/dev/null; then
+      echo "no"
+      return 1
+    fi
+  fi
+
+  if host_is_static "${HOSTNAME}"; then
+    local docroot
+    docroot="$(host_docroot "${HOSTNAME}")"
+    docroot="${docroot:-${DOCROOT_DEFAULT}}"
+    if [[ ! -d "${docroot}" ]]; then
+      echo "no"
+      return 1
+    fi
+    echo "yes"
+    return 0
+  fi
+
+  local backend_line port
+  backend_line="$(grep -m1 '^# Backend:' "${conf}" 2>/dev/null || true)"
+  port="$(echo "${backend_line}" | sed -E 's/.*:([0-9]+)$/\1/')"
+
+  if [[ -z "${port}" ]] || ! backend_listening "${port}"; then
+    echo "no"
+    return 1
+  fi
+
+  echo "yes"
+  return 0
+}
+
+# --- entry: subcommands before getopts ---
+case "${1:-}" in
+  install)
+    shift
+    cmd_install
+    exit 0
+    ;;
+  update)
+    shift
+    cmd_update "${1:-}"
+    exit 0
+    ;;
+  uninstall)
+    shift
+    cmd_uninstall "${1:-}"
+    exit 0
+    ;;
+  version|--version|-V)
+    echo "hcn ${HC_VERSION}"
+    echo "path: ${HC_SELF}"
+    exit 0
+    ;;
+  help|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+while getopts ':a:d:ls:r:q:p:b:e:k:c:C:R:gGnwySh' opt; do
+  case "${opt}" in
+    a) ACTION="add"; HOSTNAME="${OPTARG}" ;;
+    d) ACTION="delete"; HOSTNAME="${OPTARG}" ;;
+    l) ACTION="list" ;;
+    s) ACTION="show"; HOSTNAME="${OPTARG}" ;;
+    r) ACTION="renew"; HOSTNAME="${OPTARG}" ;;
+    q) ACTION="check"; HOSTNAME="${OPTARG}" ;;
+    p) PORT="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy" ;;
+    b) BACKEND="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy" ;;
+    S) SITE_MODE="static" ;;
+    R) DOCROOT="${OPTARG}"; [[ -z "${SITE_MODE}" ]] && SITE_MODE="static" ;;
+    e) CERTBOT_EMAIL="${OPTARG}" ;;
+    g) GATE_MODE="on" ;;
+    G) GATE_MODE="off" ;;
+    k) GATE_SECRET="${OPTARG}" ;;
+    c) COOKIE_NAME="${OPTARG}" ;;
+    C) COOKIE_DOMAIN="${OPTARG}" ;;
+    n) DRY_RUN=1 ;;
+    w) NO_WS=1 ;;
+    y) NO_PROMPT=1 ;;
+    h) usage; exit 0 ;;
+    :) die "Option -${OPTARG} requires an argument" ;;
+    \?) die "Unknown option -${OPTARG} (try: hcn -h)" ;;
+  esac
+done
+shift $((OPTIND - 1)) || true
+
+if [[ "${ACTION}" == "add" && "${SITE_MODE}" != "static" && -z "${PORT}" && ${#} -ge 1 ]]; then
+  PORT="$1"
+  [[ -z "${SITE_MODE}" ]] && SITE_MODE="proxy"
+fi
+
+if [[ "${SITE_MODE}" == "static" && -n "${PORT}" ]]; then
+  warn "-S (static) ignores -p ${PORT}"
+fi
+if [[ "${SITE_MODE}" == "proxy" && -n "${DOCROOT}" ]]; then
+  warn "proxy mode ignores -R ${DOCROOT} (use -S for DocumentRoot)"
+fi
+
+[[ -n "${ACTION}" ]] || { usage; exit 1; }
+
+case "${ACTION}" in
+  add)    cmd_add ;;
+  delete) cmd_delete ;;
+  list)   cmd_list ;;
+  show)   cmd_show ;;
+  renew)  cmd_renew_ssl ;;
+  check)
+    if cmd_check; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  *) die "Unknown action" ;;
+esac

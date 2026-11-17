@@ -1581,6 +1581,41 @@ sudo hc -d app.example.com
 Cloudflare SSL/TLS must be **Full** or **Full (strict)** (not Flexible).
 </details>
 
+<details>
+<summary>Install hcn (Nginx reverse-proxy + Let's Encrypt)</summary>
+
+Nginx equivalent of `hc` — installs to `/usr/local/bin/hcn` so every user can run `sudo hcn …` on a new VPS.
+
+Source file in this repo: [`hcn`](./hcn) — docs: [`hcn.md`](./hcn.md)
+
+**From this repo (after clone):**
+```bash
+sudo ./hcn install
+hcn version
+```
+
+**One-liner on a fresh VPS (no clone needed):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/KnsDev330/configs/main/hcn \
+  | sudo tee /usr/local/bin/hcn >/dev/null \
+  && sudo chmod 755 /usr/local/bin/hcn \
+  && sudo mkdir -p /etc/hcn \
+  && hcn version
+```
+
+**Typical use:**
+```bash
+sudo hcn -e admin@example.com -a app.example.com -p 3000
+sudo hcn -a app.example.com -p 3000 -g          # cookie gate
+sudo hcn -a site.example.com -S -g              # static root
+sudo hcn -l
+sudo hcn -s app.example.com
+sudo hcn -d app.example.com
+```
+
+Cloudflare SSL/TLS must be **Full** or **Full (strict)** (not Flexible).
+</details>
+
 
 
 
